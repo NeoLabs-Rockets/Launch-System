@@ -5,7 +5,7 @@
   and REST API for armed-and-trigger launch control.
 
   Features:
-    · WiFi Access Point (SSID / password configurable below)
+    · WiFi Access Point (open network, SSID configurable below)
     · NeoLabs-branded mission-control UI served from flash
     · ARM/DISARM button — trigger is gated behind arm state
     · 10-second browser countdown with TTS (Web Speech API, English)
@@ -16,10 +16,16 @@
     · Optional physical ARM toggle button
 
   REST API:
-    GET  /api/status   → { armed, trigger_active, uptime_ms, clients }
-    POST /api/arm      → { ok, armed }
-    POST /api/disarm   → { ok, armed }
-    POST /api/trigger  → { ok } | { ok, error }
+    GET  /api/status         → { armed, trigger_active, uptime_ms, clients, locked, attempts_left }
+    POST /api/arm?code=NNNNNN → { ok, armed } | 401 invalid code | 423 locked out
+    POST /api/disarm         → { ok, armed }
+    POST /api/trigger        → { ok } | { ok:false, error }
+    POST /api/buzz?ms=NNN    → { ok }   (pulses the vibration motor, ms capped at BUZZ_MAX)
+
+  Security:
+    · WiFi AP is OPEN (no WiFi password).
+    · A single 6-digit global password (ARM_CODE) protects arming, UI + API.
+    · After MAX_ATTEMPTS wrong codes the system locks out until reboot (RAM).
 
   ─────────────────────────────────────────────────────────────────────────────
   PIN ASSIGNMENTS — change only here
@@ -28,14 +34,20 @@
 #define STATUS_LED     2    // Status LED  (-1 = disabled)  GPIO 2 = onboard
 #define ARM_PIN       -1    // Physical ARM toggle (-1 = disabled)
                             // Wiring: button between ARM_PIN and GND (INPUT_PULLUP)
+#define MOTOR_PIN     23    // Vibration motor (+) → GPIO 23, (-) → GND. -1 = disabled
 
-// Network
+// Network — open Access Point (no WiFi password); arming is what's protected
 #define AP_SSID   "NeoLabs-Rockets"
-#define AP_PASS   "launch1234"           // min. 8 characters (WPA2)
+
+// Security — single global password used to arm via both UI and API
+#define ARM_CODE      "123456"           // 6-digit global password
+#define MAX_ATTEMPTS  10                 // wrong-code tries before lockout (RAM, until reboot)
 
 // Timing
 #define TRIGGER_MS   800UL   // relay pulse duration in milliseconds
 #define DEBOUNCE_MS   50UL   // physical button debounce
+#define BUZZ_MS      120UL   // default vibration pulse (per countdown step)
+#define BUZZ_MAX    1500UL   // hard cap on any single vibration pulse
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <WiFi.h>
@@ -51,6 +63,12 @@ IPAddress apIP(192, 168, 4, 1);
 bool          armed         = false;
 bool          triggerActive = false;
 unsigned long triggerStart  = 0;
+
+int           armAttempts   = 0;        // failed arm attempts (RAM only)
+bool          lockedOut     = false;    // true after MAX_ATTEMPTS, until reboot
+
+bool          motorActive   = false;    // vibration motor currently on
+unsigned long motorOff      = 0;        // millis() at which to switch it off
 
 int           lastBtnRead   = HIGH;
 unsigned long lastDebounce  = 0;
@@ -166,6 +184,56 @@ main{max-width:840px;margin:0 auto;padding:30px 18px;position:relative;z-index:1
   text-transform:uppercase;font-weight:600}
 .btn-abort:hover{border-color:var(--red);color:var(--red);box-shadow:0 0 16px rgba(255,74,61,.3)}
 
+/* ── Arm modal (pre-flight checklist + code) ── */
+#armModal{display:none;position:fixed;inset:0;z-index:550;align-items:flex-start;justify-content:center;
+  padding:40px 16px;overflow-y:auto;background:rgba(4,6,14,.86);backdrop-filter:blur(10px)}
+#armModal.show{display:flex}
+.modal{width:100%;max-width:440px;background:linear-gradient(180deg,var(--bg2),#0a0f1f);
+  border:1px solid var(--border);border-radius:18px;padding:26px;
+  box-shadow:0 24px 70px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.04)}
+.modal.shake{animation:shake .4s}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-9px)}40%,80%{transform:translateX(9px)}}
+.steps{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:22px}
+.step-dot{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:.72em;font-weight:700;color:var(--muted);background:rgba(7,11,22,.6);
+  border:1px solid var(--border);transition:all .25s}
+.step-dot.on{color:#001124;background:linear-gradient(160deg,var(--blue),var(--blue-d));border-color:var(--blue);
+  box-shadow:0 0 14px rgba(77,159,255,.4)}
+.step-dot.done{color:var(--green);border-color:rgba(54,240,160,.5);background:rgba(54,240,160,.08)}
+.step-line{width:46px;height:2px;background:var(--border);border-radius:2px}
+.modal h2{font-size:.9em;letter-spacing:.2em;font-weight:600;color:var(--ice);text-transform:uppercase;
+  display:flex;align-items:center;gap:9px}
+.modal h2 .wn{color:var(--amber)}
+.modal .sub{font-size:.7em;letter-spacing:.06em;color:var(--muted);margin:6px 0 20px;line-height:1.5}
+.check{display:flex;align-items:flex-start;gap:12px;padding:11px 13px;margin-bottom:9px;cursor:pointer;
+  background:rgba(7,11,22,.5);border:1px solid var(--border);border-radius:11px;
+  font-size:.8em;line-height:1.4;transition:all .15s;user-select:none}
+.check:hover{border-color:rgba(77,159,255,.35)}
+.check.ok{border-color:rgba(54,240,160,.5);background:rgba(54,240,160,.05)}
+.check .box{width:20px;height:20px;flex-shrink:0;border:1.6px solid var(--muted);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;font-size:.8em;color:#04121f;transition:all .15s}
+.check.ok .box{background:var(--green);border-color:var(--green)}
+.check .box::after{content:'✓';opacity:0;font-weight:900;transition:opacity .15s}
+.check.ok .box::after{opacity:1}
+.code-lbl{font-size:.62em;letter-spacing:.24em;color:var(--muted);text-transform:uppercase;margin:22px 0 10px}
+.code-row{display:flex;gap:8px;justify-content:space-between}
+.code-row input{width:100%;aspect-ratio:1/1.15;text-align:center;font-family:var(--font);
+  font-size:1.5em;font-weight:700;color:#fff;background:rgba(7,11,22,.7);
+  border:1px solid var(--border);border-radius:11px;outline:none;transition:all .15s;
+  -moz-appearance:textfield}
+.code-row input::-webkit-outer-spin-button,.code-row input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.code-row input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(77,159,255,.18)}
+.code-row input.filled{border-color:rgba(77,159,255,.6);color:var(--ice)}
+.modal-err{min-height:1.3em;font-size:.72em;letter-spacing:.08em;color:var(--red);text-align:center;margin:14px 0 4px}
+.modal-btns{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;margin-top:8px}
+.m-cancel,.m-confirm{border:none;border-radius:12px;padding:15px;font-family:inherit;font-weight:600;
+  font-size:.8em;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;transition:all .15s}
+.m-cancel{background:transparent;border:1px solid var(--muted);color:var(--muted)}
+.m-cancel:hover{border-color:var(--text);color:var(--text)}
+.m-confirm{background:linear-gradient(160deg,var(--blue),var(--blue-d));color:#001124}
+.m-confirm:hover:not(:disabled){box-shadow:0 0 26px rgba(77,159,255,.5)}
+.m-confirm:disabled{opacity:.25;cursor:not-allowed}
+
 #toast{position:fixed;bottom:26px;right:26px;background:var(--bg2);border:1px solid var(--border);
   border-radius:11px;padding:13px 22px;font-size:.82em;letter-spacing:.03em;opacity:0;transform:translateY(8px);
   transition:all .3s;z-index:600;max-width:320px;pointer-events:none;box-shadow:0 12px 30px rgba(0,0,0,.5)}
@@ -241,6 +309,59 @@ footer{text-align:center;color:var(--muted);font-size:.62em;letter-spacing:.2em;
 
 <footer>NeoLabs Rockets &middot; ESP32 Mission Control</footer>
 
+<!-- Arm modal: step 1 = pre-flight checklist, step 2 = global password -->
+<div id="armModal">
+  <div class="modal" id="modalBox">
+    <div class="steps">
+      <div class="step-dot on" id="sd1">1</div><div class="step-line"></div>
+      <div class="step-dot" id="sd2">2</div>
+    </div>
+
+    <!-- Step 1: checklist -->
+    <div id="step1">
+      <h2><span class="wn">&#9888;</span> Pre-Flight Checklist</h2>
+      <div class="sub">Confirm every safety item before continuing to the arming code.</div>
+
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Launch area is <b>clear of people</b>, animals and obstructions; bystanders at a safe distance.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Igniter / load is wired correctly and the rocket is secured on the pad.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Power supply is stable and all connections are firm.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Weather and surroundings are safe for launch; no fire hazard nearby.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>I am <b>authorized to launch</b> and ready to abort if anything goes wrong.</div></div>
+
+      <div class="modal-btns">
+        <button class="m-cancel"  onclick="closeArmModal()">Cancel</button>
+        <button class="m-confirm" id="toStep2" onclick="gotoStep(2)" disabled>Continue</button>
+      </div>
+    </div>
+
+    <!-- Step 2: global password -->
+    <div id="step2" style="display:none">
+      <h2><span class="wn">&#128274;</span> Arming Code</h2>
+      <div class="sub">Enter the 6-digit global password to arm the launch trigger.</div>
+
+      <div class="code-row" id="codeRow">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+      </div>
+
+      <div class="modal-err" id="modalErr"></div>
+      <div class="modal-btns">
+        <button class="m-cancel"  onclick="gotoStep(1)">Back</button>
+        <button class="m-confirm" id="confirmArm" onclick="confirmArm()" disabled>Arm System</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="overlay">
   <div class="cd-head">&#9654;&nbsp;LAUNCH SEQUENCE &mdash; STAND BY</div>
   <div class="cd-ring">
@@ -266,10 +387,12 @@ async function fetchStatus(){
 
 function applyStatus(d){
   const armed=!!d.armed,active=!!d.trigger_active;
+  if(d.locked!=null)lockedOut=!!d.locked;
   const ind=document.getElementById('ind'),stxt=document.getElementById('stxt');
 
   if(active){setInd(ind,'var(--amber)','0 0 10px var(--amber)');stxt.textContent='TRIGGER ACTIVE — Relay firing…';}
   else if(armed){setInd(ind,'var(--red)','0 0 10px var(--red)');stxt.textContent='SYSTEM ARMED — Ready for launch sequence';}
+  else if(lockedOut){setInd(ind,'var(--red)','0 0 10px var(--red)');stxt.textContent='LOCKED OUT — Too many wrong codes; reboot required';}
   else{setInd(ind,'var(--green)','0 0 10px var(--green)');stxt.textContent='SYSTEM SAFE — Disarmed';}
 
   document.getElementById('armed-warn').className='armed-warn'+(armed?' show':'');
@@ -283,12 +406,17 @@ function applyStatus(d){
 
   const bArm=document.getElementById('b-arm'),bTrig=document.getElementById('b-trig');
   if(armed){
-    bArm.className='btn btn-arm is-armed';
+    bArm.className='btn btn-arm is-armed';bArm.disabled=false;
     document.getElementById('arm-ico').textContent='🔓';
     document.getElementById('arm-lbl').textContent='DISARM';
     bTrig.disabled=false;bTrig.className='btn btn-trig is-armed';
+  }else if(lockedOut){
+    bArm.className='btn btn-arm';bArm.disabled=true;
+    document.getElementById('arm-ico').textContent='⛔';
+    document.getElementById('arm-lbl').textContent='LOCKED OUT';
+    bTrig.disabled=true;bTrig.className='btn btn-trig';
   }else{
-    bArm.className='btn btn-arm';
+    bArm.className='btn btn-arm';bArm.disabled=false;
     document.getElementById('arm-ico').textContent='🔒';
     document.getElementById('arm-lbl').textContent='ARM SYSTEM';
     bTrig.disabled=true;bTrig.className='btn btn-trig';
@@ -298,10 +426,89 @@ function applyStatus(d){
 function setInd(el,c,s){el.style.background=c;el.style.boxShadow=s;}
 function pad(n){return String(n).padStart(2,'0');}
 
-async function toggleArm(){
-  const isArmed=document.getElementById('b-arm').classList.contains('is-armed');
-  try{const r=await fetch(isArmed?'/api/disarm':'/api/arm',{method:'POST'});applyStatus(await r.json());}
+// ARM button → checklist+code modal; DISARM → immediate (no code, safety)
+function toggleArm(){
+  if(document.getElementById('b-arm').classList.contains('is-armed')) disarm();
+  else openArmModal();
+}
+
+async function disarm(){
+  try{const r=await fetch('/api/disarm',{method:'POST'});applyStatus(await r.json());}
   catch(_){showToast('Connection error',true);}
+}
+
+// ── Arm modal (2 steps: checklist → code) ─────────────────────────────────────
+const codeInputs=[...document.querySelectorAll('#codeRow input')];
+let lockedOut=false;
+
+function openArmModal(){
+  if(lockedOut){showToast('System locked out — reboot required',true);return;}
+  document.querySelectorAll('.check').forEach(c=>c.classList.remove('ok'));
+  codeInputs.forEach(i=>{i.value='';i.classList.remove('filled');});
+  document.getElementById('modalErr').textContent='';
+  gotoStep(1);
+  refreshChecklist();refreshConfirm();
+  document.getElementById('armModal').classList.add('show');
+}
+function closeArmModal(){document.getElementById('armModal').classList.remove('show');}
+
+function gotoStep(n){
+  document.getElementById('step1').style.display=n===1?'':'none';
+  document.getElementById('step2').style.display=n===2?'':'none';
+  document.getElementById('sd1').className='step-dot '+(n===1?'on':'done');
+  document.getElementById('sd2').className='step-dot '+(n===2?'on':'');
+  if(n===2)setTimeout(()=>codeInputs[0].focus(),60);
+}
+
+function toggleCheck(el){el.classList.toggle('ok');refreshChecklist();}
+
+function allChecked(){return [...document.querySelectorAll('.check')].every(c=>c.classList.contains('ok'));}
+function codeValue(){return codeInputs.map(i=>i.value).join('');}
+function refreshChecklist(){document.getElementById('toStep2').disabled=!allChecked();}
+function refreshConfirm(){document.getElementById('confirmArm').disabled=codeValue().length!==6;}
+
+// 6-box code entry: auto-advance, backspace, paste
+codeInputs.forEach((inp,idx)=>{
+  inp.addEventListener('input',()=>{
+    inp.value=inp.value.replace(/\D/g,'').slice(0,1);
+    inp.classList.toggle('filled',!!inp.value);
+    if(inp.value&&idx<5)codeInputs[idx+1].focus();
+    refreshConfirm();
+  });
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Backspace'&&!inp.value&&idx>0)codeInputs[idx-1].focus();
+    if(e.key==='Enter'&&!document.getElementById('confirmArm').disabled)confirmArm();
+  });
+  inp.addEventListener('paste',e=>{
+    e.preventDefault();
+    const d=(e.clipboardData.getData('text')||'').replace(/\D/g,'').slice(0,6);
+    [...d].forEach((ch,i)=>{if(codeInputs[i]){codeInputs[i].value=ch;codeInputs[i].classList.add('filled');}});
+    if(d.length)codeInputs[Math.min(d.length,5)].focus();
+    refreshConfirm();
+  });
+});
+
+async function confirmArm(){
+  const btn=document.getElementById('confirmArm');
+  if(btn.disabled)return;
+  btn.disabled=true;
+  const err=document.getElementById('modalErr');err.textContent='';
+  try{
+    const r=await fetch('/api/arm?code='+encodeURIComponent(codeValue()),{method:'POST'});
+    const d=await r.json();
+    if(r.ok&&d.armed){closeArmModal();applyStatus(d);showToast('System armed — trigger enabled');}
+    else if(r.status===423){
+      lockedOut=true;closeArmModal();
+      showToast('Too many wrong codes — locked out until reboot',true);
+      fetchStatus();
+    }else{
+      const left=(d.attempts_left!=null)?' — '+d.attempts_left+' left':'';
+      err.textContent='✖ '+(d.error||'arming rejected').toUpperCase()+left;
+      const box=document.getElementById('modalBox');box.classList.add('shake');setTimeout(()=>box.classList.remove('shake'),400);
+      codeInputs.forEach(i=>{i.value='';i.classList.remove('filled');});codeInputs[0].focus();
+      refreshConfirm();
+    }
+  }catch(_){err.textContent='✖ CONNECTION ERROR';refreshConfirm();}
 }
 
 function startSequence(){
@@ -329,9 +536,15 @@ function runCd(n){
   u.lang='en-US';u.rate=1.05;u.pitch=n<=3?1.4:1.0;
   speechSynthesis.speak(u);
 
+  // Short haptic buzz each step; a longer one at ignition
+  buzz(n===0?450:120);
+
   if(n===0){cdTimer=setTimeout(()=>{if(!aborted)fireTrigger();},500);return;}
   cdTimer=setTimeout(()=>runCd(n-1),1000);
 }
+
+// Fire-and-forget vibration request to the ESP32
+function buzz(ms){fetch('/api/buzz?ms='+ms,{method:'POST'}).catch(()=>{});}
 
 function abortSeq(){
   aborted=true;clearTimeout(cdTimer);speechSynthesis.cancel();
@@ -400,18 +613,44 @@ void handleCaptivePortal() {
 }
 
 void handleStatus() {
-  char buf[128];
+  char buf[160];
   snprintf(buf, sizeof(buf),
-    "{\"armed\":%s,\"trigger_active\":%s,\"uptime_ms\":%lu,\"clients\":%d}",
+    "{\"armed\":%s,\"trigger_active\":%s,\"uptime_ms\":%lu,\"clients\":%d,\"locked\":%s,\"attempts_left\":%d}",
     armed         ? "true" : "false",
     triggerActive ? "true" : "false",
     millis(),
-    (int)WiFi.softAPgetStationNum()
+    (int)WiFi.softAPgetStationNum(),
+    lockedOut ? "true" : "false",
+    lockedOut ? 0 : (MAX_ATTEMPTS - armAttempts)
   );
   sendJSON(200, buf);
 }
 
-void handleArm()    { armed = true;  sendJSON(200, "{\"ok\":true,\"armed\":true}"); }
+void handleArm() {
+  // Locked out until reboot once too many wrong codes were entered
+  if (lockedOut) { sendJSON(423, "{\"ok\":false,\"error\":\"locked out\"}"); return; }
+
+  // 6-digit global password required (from ?code= query or form body)
+  if (server.arg("code") != ARM_CODE) {
+    armAttempts++;
+    if (armAttempts >= MAX_ATTEMPTS) {
+      lockedOut = true;
+      Serial.println("[SECURITY] Locked out after too many wrong codes");
+      sendJSON(423, "{\"ok\":false,\"error\":\"locked out\"}");
+      return;
+    }
+    char buf[80];
+    snprintf(buf, sizeof(buf),
+      "{\"ok\":false,\"error\":\"invalid code\",\"attempts_left\":%d}",
+      MAX_ATTEMPTS - armAttempts);
+    sendJSON(401, buf);
+    return;
+  }
+
+  armAttempts = 0;   // reset counter on success
+  armed = true;
+  sendJSON(200, "{\"ok\":true,\"armed\":true}");
+}
 void handleDisarm() { armed = false; sendJSON(200, "{\"ok\":true,\"armed\":false}"); }
 
 void handleTrigger() {
@@ -422,6 +661,22 @@ void handleTrigger() {
   triggerStart  = millis();
   armed         = false;
   Serial.println("[TRIGGER] Pulse started");
+  sendJSON(200, "{\"ok\":true}");
+}
+
+// Start a non-blocking vibration pulse of the given duration (clamped)
+void buzz(unsigned long ms) {
+  if (MOTOR_PIN < 0) return;
+  if (ms > BUZZ_MAX) ms = BUZZ_MAX;
+  if (ms < 1)        ms = 1;
+  digitalWrite(MOTOR_PIN, HIGH);
+  motorActive = true;
+  motorOff    = millis() + ms;
+}
+
+void handleBuzz() {
+  unsigned long ms = server.hasArg("ms") ? (unsigned long)server.arg("ms").toInt() : BUZZ_MS;
+  buzz(ms);
   sendJSON(200, "{\"ok\":true}");
 }
 
@@ -462,12 +717,13 @@ void setup() {
   pinMode(TRIGGER_PIN, OUTPUT);
   digitalWrite(TRIGGER_PIN, LOW);
   if (STATUS_LED >= 0) { pinMode(STATUS_LED, OUTPUT); digitalWrite(STATUS_LED, LOW); }
+  if (MOTOR_PIN  >= 0) { pinMode(MOTOR_PIN,  OUTPUT); digitalWrite(MOTOR_PIN,  LOW); }
   if (ARM_PIN    >= 0)   pinMode(ARM_PIN, INPUT_PULLUP);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
 
-  if (!WiFi.softAP(AP_SSID, AP_PASS)) {
+  if (!WiFi.softAP(AP_SSID)) {           // open network, no WiFi password
     Serial.println("[ERROR] AP startup failed");
     if (STATUS_LED >= 0) while (true) { digitalWrite(STATUS_LED, !digitalRead(STATUS_LED)); delay(100); }
     while (true) delay(1000);
@@ -492,6 +748,7 @@ void setup() {
   server.on("/api/arm",                  HTTP_POST, handleArm);
   server.on("/api/disarm",               HTTP_POST, handleDisarm);
   server.on("/api/trigger",              HTTP_POST, handleTrigger);
+  server.on("/api/buzz",                 HTTP_POST, handleBuzz);
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("[OK] Web server started — connect to the AP and the captive portal should open");
@@ -507,6 +764,12 @@ void loop() {
     digitalWrite(TRIGGER_PIN, LOW);
     triggerActive = false;
     Serial.println("[TRIGGER] Pulse complete");
+  }
+
+  // End the vibration pulse once its duration has elapsed (non-blocking)
+  if (motorActive && (long)(millis() - motorOff) >= 0) {
+    digitalWrite(MOTOR_PIN, LOW);
+    motorActive = false;
   }
 
   if (STATUS_LED >= 0) {
