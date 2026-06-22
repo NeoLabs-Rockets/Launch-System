@@ -26,7 +26,7 @@
 */
 #define TRIGGER_PIN   26    // Output: 800 ms HIGH pulse on fire
 #define STATUS_LED     2    // Status LED  (-1 = disabled)  GPIO 2 = onboard
-#define ARM_PIN       25    // Physical ARM toggle (-1 = disabled)
+#define ARM_PIN       -1    // Physical ARM toggle (-1 = disabled)
                             // Wiring: button between ARM_PIN and GND (INPUT_PULLUP)
 
 // Network
@@ -40,8 +40,13 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 
 WebServer server(80);
+DNSServer dnsServer;
+
+const byte DNS_PORT = 53;
+IPAddress apIP(192, 168, 4, 1);
 
 bool          armed         = false;
 bool          triggerActive = false;
@@ -389,6 +394,11 @@ void handleRoot() {
   server.send(200, "text/html", HTML_PAGE);
 }
 
+void handleCaptivePortal() {
+  setCORSHeaders();
+  server.send(200, "text/html", HTML_PAGE);
+}
+
 void handleStatus() {
   char buf[128];
   snprintf(buf, sizeof(buf),
@@ -417,6 +427,15 @@ void handleTrigger() {
 
 void handleNotFound() {
   if (server.method() == HTTP_OPTIONS) { setCORSHeaders(); server.send(204); return; }
+
+  // Captive portal fallback:
+  // Anything that is not an API request gets the UI, so phones/laptops that
+  // probe URLs like /generate_204, /hotspot-detect.html, etc. open the portal.
+  if (!server.uri().startsWith("/api/")) {
+    handleCaptivePortal();
+    return;
+  }
+
   sendJSON(404, "{\"ok\":false,\"error\":\"not found\"}");
 }
 
@@ -446,6 +465,8 @@ void setup() {
   if (ARM_PIN    >= 0)   pinMode(ARM_PIN, INPUT_PULLUP);
 
   WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+
   if (!WiFi.softAP(AP_SSID, AP_PASS)) {
     Serial.println("[ERROR] AP startup failed");
     if (STATUS_LED >= 0) while (true) { digitalWrite(STATUS_LED, !digitalRead(STATUS_LED)); delay(100); }
@@ -453,18 +474,32 @@ void setup() {
   }
   Serial.printf("[OK] AP up  SSID: %s  IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
 
-  server.on("/",            HTTP_GET,  handleRoot);
-  server.on("/api/status",  HTTP_GET,  handleStatus);
-  server.on("/api/arm",     HTTP_POST, handleArm);
-  server.on("/api/disarm",  HTTP_POST, handleDisarm);
-  server.on("/api/trigger", HTTP_POST, handleTrigger);
+  // Wildcard DNS redirects all hostnames to the ESP32 AP IP.
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  server.on("/",                         HTTP_GET,  handleRoot);
+
+  // Common captive-portal probe URLs used by Android, iOS/macOS, and Windows.
+  server.on("/generate_204",             HTTP_GET,  handleCaptivePortal);
+  server.on("/gen_204",                  HTTP_GET,  handleCaptivePortal);
+  server.on("/hotspot-detect.html",      HTTP_GET,  handleCaptivePortal);
+  server.on("/library/test/success.html",HTTP_GET,  handleCaptivePortal);
+  server.on("/ncsi.txt",                 HTTP_GET,  handleCaptivePortal);
+  server.on("/connecttest.txt",          HTTP_GET,  handleCaptivePortal);
+  server.on("/redirect",                 HTTP_GET,  handleCaptivePortal);
+
+  server.on("/api/status",               HTTP_GET,  handleStatus);
+  server.on("/api/arm",                  HTTP_POST, handleArm);
+  server.on("/api/disarm",               HTTP_POST, handleDisarm);
+  server.on("/api/trigger",              HTTP_POST, handleTrigger);
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[OK] Web server started — open http://192.168.4.1");
+  Serial.println("[OK] Web server started — connect to the AP and the captive portal should open");
 }
 
 // ─── Loop ────────────────────────────────────────────────────────────────────
 void loop() {
+  dnsServer.processNextRequest();
   server.handleClient();
   checkArmButton();
 
