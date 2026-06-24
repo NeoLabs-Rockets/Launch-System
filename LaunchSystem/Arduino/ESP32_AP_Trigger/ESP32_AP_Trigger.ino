@@ -44,7 +44,7 @@
 #define MAX_ATTEMPTS  10                 // wrong-code tries before lockout (RAM, until reboot)
 
 // Timing
-#define TRIGGER_MS   800UL   // relay pulse duration in milliseconds
+#define TRIGGER_MS   2000UL   // relay pulse duration in milliseconds
 #define DEBOUNCE_MS   50UL   // physical button debounce
 #define BUZZ_MS      120UL   // default vibration pulse (per countdown step)
 #define BUZZ_MAX    1500UL   // hard cap on any single vibration pulse
