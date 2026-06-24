@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeoLabs · Mission Dashboard</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="loader">
+  <div class="spin"></div>
+  <div class="load-txt" id="load-txt">Acquiring location…</div>
+</div>
+
+<header>
+  <div class="brand">
+    <svg class="hole" viewBox="0 0 100 100">
+      <defs>
+        <radialGradient id="gc" cx="50%" cy="50%" r="50%">
+          <stop offset="62%" stop-color="#000"/>
+          <stop offset="80%" stop-color="#0a1830"/>
+          <stop offset="100%" stop-color="#000"/>
+        </radialGradient>
+        <linearGradient id="gr" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#9fd4ff"/>
+          <stop offset="50%" stop-color="#4d9fff"/>
+          <stop offset="100%" stop-color="#1c4f9e"/>
+        </linearGradient>
+      </defs>
+      <ellipse cx="50" cy="50" rx="46" ry="13" fill="none" stroke="url(#gr)" stroke-width="2.4" opacity=".85"/>
+      <circle cx="50" cy="50" r="26" fill="url(#gc)"/>
+      <circle cx="50" cy="50" r="26" fill="none" stroke="url(#gr)" stroke-width="3"/>
+      <path d="M24 50a26 26 0 0 0 52 0" fill="none" stroke="#cfe9ff" stroke-width="1.6" opacity=".9"/>
+    </svg>
+    <div>
+      <div class="wm"><span class="neo">NEO</span><span class="labs">LABS</span></div>
+      <div class="tag">Rockets · Mission Dashboard</div>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <div class="hdr-dot"></div>
+    <div class="hdr-loc" id="hdr-loc">—</div>
+    <div id="hdr-clock">—</div>
+    <button class="settings-btn" id="settings-open" type="button" aria-label="Rocket settings">⚙</button>
+  </div>
+</header>
+
+<main>
+  <div id="err-banner" class="err-banner"></div>
+
+  <div class="rocket-badge" id="rocket-badge" role="button" tabindex="0" aria-label="Edit rocket profile">
+    <div class="rb-name" id="rocket-name">—</div>
+    <div class="rb-chip"><b id="rocket-motor-class">—</b> class</div>
+    <div class="rb-chip"><b id="rocket-mass">—</b> launch mass</div>
+    <div class="rb-chip"><b id="rocket-apogee">—</b> est. apogee</div>
+    <div class="rb-chip"><b id="rocket-refresh">5 min</b> live refresh</div>
+    <div class="rb-edit">Edit Rocket</div>
+  </div>
+
+  <div class="card" id="status-card">
+    <div class="go-badge" id="go-badge">
+      <div class="go-label" id="go-label">—</div>
+      <div class="go-sub">Launch Status</div>
+    </div>
+    <div class="factors" id="factors-list"></div>
+  </div>
+
+  <div class="card rocket-model">
+    <div class="card-head">
+      <div class="lbl">Rocket Flight Model</div>
+      <div class="card-head-note" id="model-refresh-note">Recomputes every minute and after each live refresh.</div>
+    </div>
+    <div class="derived-grid">
+      <div class="derived-item">
+        <div class="k">Estimated Apogee</div>
+        <div class="v" id="fm-apogee">—</div>
+        <div class="s" id="fm-apogee-sub">—</div>
+      </div>
+      <div class="derived-item">
+        <div class="k">Rail Exit</div>
+        <div class="v" id="fm-rail">—</div>
+        <div class="s" id="fm-rail-sub">—</div>
+      </div>
+      <div class="derived-item">
+        <div class="k">Safe Wind</div>
+        <div class="v" id="fm-wind">—</div>
+        <div class="s" id="fm-wind-sub">—</div>
+      </div>
+      <div class="derived-item">
+        <div class="k">Airspace Buffer</div>
+        <div class="v" id="fm-airspace">—</div>
+        <div class="s" id="fm-airspace-sub">—</div>
+      </div>
+      <div class="derived-item">
+        <div class="k">Mission Duration</div>
+        <div class="v" id="fm-duration">—</div>
+        <div class="s" id="fm-duration-sub">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card" id="weather-card">
+      <div class="lbl">Weather Conditions</div>
+      <div class="wx-main">
+        <div class="wx-icon" id="wx-icon">—</div>
+        <div>
+          <div class="wx-temp"><span id="wx-temp">—</span><span style="font-size:.5em;color:var(--muted)">°C</span></div>
+          <div class="wx-desc" id="wx-desc">—</div>
+        </div>
+      </div>
+      <div class="wx-grid">
+        <div class="wx-stat"><div class="k">Cloud Cover</div><div class="v" id="wx-cloud">—</div></div>
+        <div class="wx-stat"><div class="k">Precipitation</div><div class="v" id="wx-precip">—</div></div>
+        <div class="wx-stat"><div class="k">Visibility</div><div class="v" id="wx-vis">—</div></div>
+        <div class="wx-stat"><div class="k">UV Index</div><div class="v" id="wx-uv">—</div></div>
+      </div>
+    </div>
+
+    <div class="card" id="wind-card">
+      <div class="lbl">Wind</div>
+      <div class="wind-layout">
+        <svg id="compass-svg" width="130" height="130" viewBox="0 0 130 130">
+          <circle cx="65" cy="65" r="62" fill="rgba(7,11,22,.8)" stroke="#1b2746" stroke-width="1.5"/>
+          <g id="ticks" stroke="#2a3a5a" stroke-width="1"></g>
+          <text x="65" y="14" text-anchor="middle" fill="#9fd4ff" font-size="11" font-weight="700" font-family="inherit">N</text>
+          <text x="120" y="69" text-anchor="middle" fill="#3a5070" font-size="9" font-family="inherit">E</text>
+          <text x="65" y="122" text-anchor="middle" fill="#3a5070" font-size="9" font-family="inherit">S</text>
+          <text x="10" y="69" text-anchor="middle" fill="#3a5070" font-size="9" font-family="inherit">W</text>
+          <g id="wind-arrow" transform="rotate(0,65,65)">
+            <line x1="65" y1="65" x2="65" y2="24" stroke="#4d9fff" stroke-width="2.5" stroke-linecap="round"/>
+            <polygon points="65,17 61,28 69,28" fill="#4d9fff"/>
+            <line x1="65" y1="65" x2="65" y2="98" stroke="#1b2746" stroke-width="1.5" stroke-linecap="round"/>
+          </g>
+          <circle cx="65" cy="65" r="4" fill="#4d9fff" opacity=".9"/>
+        </svg>
+        <div class="wind-stats">
+          <div class="wind-stat">
+            <div class="k">Speed</div>
+            <div class="v"><span id="wind-speed">—</span> <span style="font-size:.55em;color:var(--muted)">km/h</span></div>
+            <div class="wind-dir-label" id="wind-from">—</div>
+          </div>
+          <div class="wind-stat">
+            <div class="k">Gusts</div>
+            <div class="v"><span id="wind-gust">—</span> <span style="font-size:.55em;color:var(--muted)">km/h</span></div>
+          </div>
+          <div class="wind-stat">
+            <div class="k">Direction</div>
+            <div class="v"><span id="wind-deg">—</span><span style="font-size:.55em;color:var(--muted)">°</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-4">
+    <div class="card mini-stat">
+      <div class="lbl">Humidity</div>
+      <div class="mini-big"><span id="hum-val">—</span><span class="unit">%</span></div>
+      <div class="mini-bar"><div class="mini-fill" id="hum-bar" style="width:0%"></div></div>
+      <div class="mini-sub">Dew point <span id="dewpoint">—</span>°C</div>
+    </div>
+    <div class="card mini-stat">
+      <div class="lbl">Pressure</div>
+      <div class="mini-big"><span id="pres-val">—</span><span class="unit">hPa</span></div>
+      <div class="mini-sub" id="pres-sub">—</div>
+    </div>
+    <div class="card mini-stat">
+      <div class="lbl">Sunrise / Sunset</div>
+      <div class="daylight-row" style="margin-bottom:0">
+        <div class="icon">🌅</div>
+        <div class="info"><div class="t" id="sunrise">—</div><div class="s">Sunrise</div></div>
+      </div>
+      <div class="daylight-row" style="margin:8px 0 0">
+        <div class="icon">🌇</div>
+        <div class="info"><div class="t" id="sunset">—</div><div class="s">Sunset</div></div>
+      </div>
+      <div class="moon-row">
+        <div class="moon-icon" id="moon-icon">🌑</div>
+        <div><div style="font-size:.82em;color:var(--silver);font-weight:600" id="moon-phase">—</div>
+          <div style="font-size:.7em;color:var(--muted)">Moon phase</div></div>
+      </div>
+    </div>
+    <div class="card mini-stat">
+      <div class="lbl">Daylight Left</div>
+      <div class="mini-big" id="daylight-left">—</div>
+      <div class="mini-bar"><div class="mini-fill" id="day-bar" style="width:0%;background:linear-gradient(90deg,#ffb347,#ff8c00)"></div></div>
+      <div class="mini-sub" id="day-sub">of total daylight today</div>
+    </div>
+  </div>
+
+  <div class="card" id="aircraft-card">
+    <div class="ac-header">
+      <div>
+        <div class="lbl" style="margin-bottom:0">Airspace — Within 80 km</div>
+        <div class="ac-count" id="ac-count" style="margin-top:4px">Fetching aircraft…</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button id="aircraft-refresh"
+          style="background:rgba(77,159,255,.1);border:1px solid rgba(77,159,255,.3);border-radius:6px;
+            color:var(--ice);font-size:.72em;letter-spacing:.1em;padding:4px 10px;cursor:pointer;
+            font-family:inherit;text-transform:uppercase">↻ Refresh</button>
+        <div class="ac-badge" id="ac-badge">—</div>
+      </div>
+    </div>
+    <div id="ac-table-wrap">
+      <div class="empty-state">Fetching airspace data…</div>
+    </div>
+  </div>
+</main>
+
+<footer id="footer-ts">NeoLabs Rockets · Mission Dashboard · Auto-refreshes every 5 min</footer>
+
+<div class="s-overlay" id="settings-overlay"></div>
+<aside id="settings-panel" aria-hidden="true">
+  <div class="sp-hd">
+    <div class="sp-hd-title">Rocket Settings</div>
+    <button class="sp-close" id="settings-close" type="button" aria-label="Close settings">✕</button>
+  </div>
+  <div class="sp-body">
+    <div class="sp-sec">Saved Configurations</div>
+    <div class="sp-row full">
+      <div class="sp-field">
+        <label for="rp-profile-select">Configuration Library</label>
+        <select id="rp-profile-select"></select>
+      </div>
+    </div>
+    <div class="sp-actions">
+      <button class="sp-secondary" id="profile-load" type="button">Load Selected</button>
+      <button class="sp-secondary" id="profile-duplicate" type="button">Save As New</button>
+      <button class="sp-secondary danger" id="profile-delete" type="button">Delete</button>
+    </div>
+    <div class="sp-help" id="profile-status">Saved configs are stored locally in this browser.</div>
+
+    <div class="sp-sec">Rocket</div>
+    <div class="sp-row full">
+      <div class="sp-field">
+        <label for="rp-name">Rocket Name</label>
+        <input id="rp-name" type="text" maxlength="64">
+      </div>
+    </div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-length-mm">Length (mm)</label>
+        <input id="rp-length-mm" type="number" min="100" max="4000" step="1">
+      </div>
+      <div class="sp-field">
+        <label for="rp-mass-g">Launch Mass (g)</label>
+        <input id="rp-mass-g" type="number" min="20" max="50000" step="1">
+      </div>
+    </div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-diameter-mm">Body Diameter (mm)</label>
+        <input id="rp-diameter-mm" type="number" min="10" max="300" step="1">
+      </div>
+      <div class="sp-field">
+        <label for="rp-cd">Drag Coefficient</label>
+        <input id="rp-cd" type="number" min="0.2" max="1.8" step="0.01">
+      </div>
+    </div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-rail-length">Launch Rail (m)</label>
+        <input id="rp-rail-length" type="number" min="0.5" max="8" step="0.1">
+      </div>
+      <div class="sp-field">
+        <label for="rp-recommended">Recommended Motors</label>
+        <input id="rp-recommended" type="text" maxlength="80">
+      </div>
+    </div>
+
+    <div class="sp-sec">Motor</div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-motor-class">Motor Class</label>
+        <select id="rp-motor-class">
+          <option value="1/2A">1/2A</option>
+          <option value="A">A</option>
+          <option value="B">B</option>
+          <option value="C">C</option>
+          <option value="D">D</option>
+          <option value="E">E</option>
+          <option value="F">F</option>
+          <option value="G">G</option>
+          <option value="H">H</option>
+          <option value="I">I</option>
+          <option value="J">J</option>
+          <option value="K">K</option>
+          <option value="L">L</option>
+          <option value="M">M</option>
+          <option value="N">N</option>
+          <option value="O">O</option>
+        </select>
+      </div>
+      <div class="sp-field">
+        <label for="rp-impulse-ns">Total Impulse (N·s)</label>
+        <input id="rp-impulse-ns" type="number" min="0.5" max="40000" step="0.1">
+      </div>
+    </div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-burn-time">Burn Time (s)</label>
+        <input id="rp-burn-time" type="number" min="0.2" max="20" step="0.1">
+      </div>
+      <div class="sp-field">
+        <label for="rp-descent-rate">Descent Rate (m/s)</label>
+        <input id="rp-descent-rate" type="number" min="1" max="25" step="0.1">
+      </div>
+    </div>
+
+    <div class="sp-sec">Mission</div>
+    <div class="sp-row">
+      <div class="sp-field">
+        <label for="rp-recovery-radius">Recovery Radius (m)</label>
+        <input id="rp-recovery-radius" type="number" min="50" max="5000" step="10">
+      </div>
+      <div class="sp-field">
+        <label for="rp-recovery-buffer">Recovery Buffer (min)</label>
+        <input id="rp-recovery-buffer" type="number" min="1" max="90" step="1">
+      </div>
+    </div>
+    <div class="sp-row full">
+      <div class="sp-field">
+        <label for="rp-notes">Notes</label>
+        <textarea id="rp-notes" rows="4"></textarea>
+      </div>
+    </div>
+
+    <div class="sp-sec">Derived Flight Model</div>
+    <div class="sp-derived">
+      <div class="sp-dr"><span class="sp-dk">Average Thrust</span><span class="sp-dv" id="sp-thrust">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Thrust / Weight</span><span class="sp-dv" id="sp-twr">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Rail Exit Speed</span><span class="sp-dv" id="sp-rail-exit">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Estimated Apogee</span><span class="sp-dv" id="sp-apogee">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Mission Duration</span><span class="sp-dv" id="sp-mission">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Safe Wind</span><span class="sp-dv" id="sp-safe-wind">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Airspace Buffer</span><span class="sp-dv" id="sp-airspace">—</span></div>
+      <div class="sp-dr"><span class="sp-dk">Recovery Drift At Safe Wind</span><span class="sp-dv" id="sp-drift">—</span></div>
+    </div>
+
+    <button class="sp-save" id="settings-save" type="button">Save Current Profile</button>
+  </div>
+</aside>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
