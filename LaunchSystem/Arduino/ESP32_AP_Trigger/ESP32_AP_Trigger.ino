@@ -110,7 +110,7 @@ unsigned long lastBleActivity = 0;
 unsigned long lastBleStatusNotify = 0;
 
 // ─── Embedded web UI ─────────────────────────────────────────────────────────
-static const char HTML_PAGE_SAFE[] = R"HTMLSAFE(<!doctype html>
+static const char HTML_PAGE_SAFE[] PROGMEM = R"HTMLSAFE(<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -387,7 +387,7 @@ void restartBleAdvertising() {
 // ─── Route handlers ──────────────────────────────────────────────────────────
 void handleRoot() {
   setCORSHeaders();
-  server.send(200, "text/html", HTML_PAGE_SAFE);
+  server.send_P(200, "text/html", HTML_PAGE_SAFE);
 }
 
 void handleCaptivePortal() {
@@ -558,9 +558,7 @@ void handleBuzz() {
 void handleNotFound() {
   if (server.method() == HTTP_OPTIONS) { setCORSHeaders(); server.send(204); return; }
 
-  // Captive portal fallback:
-  // Anything that is not an API request gets a lightweight instruction page.
-  // The full Mission Control UI is only served from http://192.168.4.1/.
+  // Anything that is not an API request falls back to the AP controller.
   if (!server.uri().startsWith("/api/")) {
     handleCaptivePortal();
     return;
@@ -585,6 +583,7 @@ void checkArmButton() {
           buzz(ARM_BUZZ_MS);
         } else {
           countdownActive = false;
+          lastCountdownBuzzSecond = -1;
           activeBleSid = "";
           lastBleError = "";
           buzz(DISARM_BUZZ_MS);
@@ -622,6 +621,7 @@ void setup() {
   dnsServer.start(DNS_PORT, "*", apIP);
 
   server.on("/",                         HTTP_GET,  handleRoot);
+  server.on("/index.html",               HTTP_GET,  handleRoot);
 
   // Common captive-network checks. Return the expected success response so the
   // OS popup closes; real control UI stays at http://192.168.4.1/.

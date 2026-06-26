@@ -12,6 +12,10 @@ let externalCountdownActive = false;
 let syncOffsetMs = 0;
 let cameraBleConnected = false;
 let cameraBleDeviceName = '';
+let countdownAudioCtx = null;
+let countdownAudioDest = null;
+let lastCountdownSpoken = null;
+let speechPrimed = false;
 const CAMERA_LAUNCH_CHANNEL = typeof BroadcastChannel !== 'undefined'
   ? new BroadcastChannel('neolabs-launch')
   : null;
@@ -72,7 +76,13 @@ function bindLaunchEvents() {
 
 function applyLaunchEvent(data) {
   if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
-  if (data.type === 'countdown_start' || data.type === 'countdown_tick') {
+  if (data.type === 'countdown_start') {
+    lastCountdownSpoken = null;
+    externalCountdownBaseEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || data.seconds || 0) * 1000);
+    externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
+    externalCountdownActive = true;
+    updateExternalCountdownLabel();
+  } else if (data.type === 'countdown_tick') {
     externalCountdownBaseEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || 0) * 1000);
     externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
     externalCountdownActive = true;
@@ -84,6 +94,7 @@ function applyLaunchEvent(data) {
     setTimeout(() => { externalCountdownActive = false; }, 3000);
   } else if (data.type === 'abort') {
     externalCountdownActive = false;
+    lastCountdownSpoken = null;
     document.getElementById('cam-count-state').textContent = 'Aborted';
   }
 }
@@ -103,6 +114,7 @@ function updateExternalCountdownLabel() {
   document.getElementById('cam-count-state').textContent = leftMs > 0
     ? `Live T-${formatCountdown(leftMs)}`
     : 'Ignition';
+  speakCountdownAt(leftMs);
 }
 
 function startClock() {
@@ -156,7 +168,7 @@ async function openCamera() {
       try {
         audioStream = await navigator.mediaDevices.getUserMedia({
           video: false,
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
         });
         document.getElementById('cam-audio-state').textContent = 'Mic on';
       } catch (_) {
@@ -328,6 +340,8 @@ async function startRecording() {
   const videoTrackStream = canvas.captureStream(q.fps);
   mixedStream = new MediaStream(videoTrackStream.getVideoTracks());
   if (audioStream) audioStream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
+  ensureCountdownAudio();
+  countdownAudioDest?.stream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
 
   chunks = [];
   const mimeType = preferredMimeType();
@@ -397,6 +411,66 @@ function formatCountdown(ms) {
   return `${pad(minutes)}:${pad(seconds)}.${tenths}`;
 }
 
+function ensureCountdownAudio() {
+  try {
+    countdownAudioCtx = countdownAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (countdownAudioCtx.state === 'suspended') countdownAudioCtx.resume();
+    if (!countdownAudioDest) countdownAudioDest = countdownAudioCtx.createMediaStreamDestination();
+    return countdownAudioDest;
+  } catch (_) {
+    return null;
+  }
+}
+
+function speakCountdownAt(leftMs) {
+  if (leftMs == null) return;
+  const second = leftMs <= 0 ? 0 : Math.ceil(leftMs / 1000);
+  if (second > 10 || second === lastCountdownSpoken) return;
+  lastCountdownSpoken = second;
+  playRecordedCountdownCue(second);
+  speakOverSpeaker(second);
+}
+
+function playRecordedCountdownCue(second) {
+  try {
+    ensureCountdownAudio();
+    if (!countdownAudioCtx || !countdownAudioDest) return;
+    const osc = countdownAudioCtx.createOscillator();
+    const gain = countdownAudioCtx.createGain();
+    osc.type = second <= 0 ? 'sawtooth' : 'sine';
+    osc.frequency.value = second <= 0 ? 440 : 880;
+    gain.gain.value = second <= 0 ? 0.12 : 0.055;
+    osc.connect(gain);
+    gain.connect(countdownAudioDest);
+    gain.connect(countdownAudioCtx.destination);
+    const duration = second <= 0 ? 0.42 : 0.12;
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.001, countdownAudioCtx.currentTime + duration);
+    osc.stop(countdownAudioCtx.currentTime + duration);
+  } catch (_) {}
+}
+
+function speakOverSpeaker(second) {
+  if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) return;
+  try {
+    if (!speechPrimed) {
+      speechSynthesis.cancel();
+      speechSynthesis.getVoices();
+      speechPrimed = true;
+    }
+    const utterance = new SpeechSynthesisUtterance(second <= 0 ? 'Ignition' : String(second));
+    const voices = speechSynthesis.getVoices();
+    const voice = voices.find(v => /^en[-_]/i.test(v.lang)) || voices[0];
+    if (voice) utterance.voice = voice;
+    utterance.lang = (voice && voice.lang) || 'en-US';
+    utterance.rate = 1.32;
+    utterance.pitch = second <= 3 ? 1.15 : 1;
+    utterance.volume = 1;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(utterance);
+  } catch (_) {}
+}
+
 function setStatus(title, detail, state) {
   const banner = document.getElementById('cam-banner');
   banner.className = `net-banner ${state || 'warn'}`;
@@ -412,6 +486,7 @@ function stopStreams() {
   sourceStream = null;
   audioStream = null;
   mixedStream = null;
+  countdownAudioDest = null;
   document.getElementById('cam-record').disabled = true;
   document.getElementById('cam-stop').disabled = true;
 }

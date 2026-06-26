@@ -27,15 +27,26 @@ let bleStatusData = null;
 let bleLastStatusAt = 0;
 let bleLastKnownName = localStorage.getItem('neolabs.ble.deviceName') || '';
 let restoringCountdown = false;
+let bleInitDone = false;
 
-window.addEventListener('DOMContentLoaded', () => {
+function initBleController() {
+  if (bleInitDone) return;
+  bleInitDone = true;
   restoreActiveLaunch();
   bindBleUi();
   publishPublicApi();
   renderLaunch();
   restoreGrantedBle();
   setInterval(checkLaunchLinkHealth, 1000);
-});
+}
+
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', initBleController);
+} else {
+  initBleController();
+}
+window.addEventListener('load', initBleController);
+setTimeout(initBleController, 0);
 
 function bindBleUi() {
   on('ble-connect', 'click', connectBle);
@@ -54,13 +65,24 @@ function publishPublicApi() {
     connect: connectBle,
     disconnect: disconnectBle,
     send: sendBle,
+    armWithCode,
+    disarm: disarmController,
+    startCountdown: startCountdownWithCode,
+    abort: abortController,
     status: () => bleStatusData || {},
     connected: () => bleConnected,
+    countdownEndsAt: () => launchCountdownEndsAt,
+    countdownActive: () => launchCountdownActive,
     deviceName: () => bleDevice?.name || bleLastKnownName || ''
   };
 }
 
 async function restoreGrantedBle() {
+  if (parentBle()) {
+    setLaunchState(parentBle().connected() ? 'BLE linked through dashboard shell' : 'Use the shell Connect BLE button', parentBle().connected() ? 'ok' : 'warn');
+    renderLaunch();
+    return;
+  }
   if (!hasBluetooth()) {
     setLaunchState('Web Bluetooth unavailable in this browser', 'bad');
     renderLaunch();
@@ -90,6 +112,13 @@ async function restoreGrantedBle() {
 }
 
 async function connectBle() {
+  const pb = parentBle();
+  if (pb) {
+    await pb.connect();
+    setLaunchState(pb.connected() ? 'BLE linked through dashboard shell' : 'BLE not connected', pb.connected() ? 'ok' : 'warn');
+    renderLaunch();
+    return;
+  }
   if (!hasBluetooth()) {
     setLaunchState('Web Bluetooth is not available in this browser', 'bad');
     renderLaunch();
@@ -145,6 +174,13 @@ function onBleStatusChanged(event) {
 }
 
 async function disconnectBle() {
+  const pb = parentBle();
+  if (pb) {
+    await pb.disconnect();
+    setLaunchState('Dashboard shell BLE disconnected', 'warn');
+    renderLaunch();
+    return;
+  }
   if (launchCountdownActive) await abortLaunchCountdown();
   try { bleDevice?.gatt?.disconnect(); } catch (_) {}
   onBleDisconnected();
@@ -177,9 +213,9 @@ async function armLaunch() {
     return;
   }
   try {
-    await sendBle({ cmd: 'arm', code });
-    launchCodeMemory = code;
-    clearVisibleCode();
+    const pb = parentBle();
+    if (pb) await pb.armWithCode(code);
+    else await armWithCode(code);
     setLaunchState('Arm command sent', 'warn');
   } catch (err) {
     clearLaunchCredential();
@@ -190,12 +226,9 @@ async function armLaunch() {
 
 async function disarmLaunch() {
   try {
-    await sendBle({ cmd: 'disarm' });
-    stopLaunchHeartbeat();
-    cancelLaunchSpeech();
-    stopLaunchCountdownUi('Disarmed');
-    clearLaunchCredential();
-    broadcastLaunch({ type: 'abort', reason: 'Disarmed', mode: 'ble' });
+    const pb = parentBle();
+    if (pb) await pb.disarm();
+    else await disarmController();
     setLaunchState('Controller disarmed', 'ok');
   } catch (err) {
     setLaunchState(`Disarm failed: ${err.message || err}`, 'bad');
@@ -212,17 +245,14 @@ async function startLaunchCountdown() {
   }
   primeLaunchSpeech();
   try {
-    await sendBle({ cmd: 'countdown_start', seconds, code });
-    launchCountdownEndsAt = Date.now() + seconds * 1000;
-    launchCountdownActive = true;
-    launchLastSpokenSecond = null;
-    launchCodeMemory = code;
-    persistActiveLaunch();
-    broadcastLaunch({ type: 'countdown_start', seconds, endsAt: launchCountdownEndsAt, mode: 'ble' });
-    startLaunchHeartbeat();
-    runLaunchCountdownTick();
-    clearInterval(launchCountdownTimer);
-    launchCountdownTimer = setInterval(runLaunchCountdownTick, 150);
+    const pb = parentBle();
+    if (pb) {
+      await pb.startCountdown(seconds, code);
+      launchCountdownEndsAt = pb.countdownEndsAt();
+      launchCountdownActive = pb.countdownActive();
+    } else {
+      await startCountdownWithCode(seconds, code);
+    }
     setLaunchState('Live BLE countdown active', 'bad');
   } catch (err) {
     setLaunchState(`Countdown rejected: ${err.message || err}`, 'bad');
@@ -265,6 +295,49 @@ function stopLaunchHeartbeat() {
 }
 
 async function abortLaunchCountdown() {
+  const pb = parentBle();
+  if (pb) {
+    await pb.abort();
+    setLaunchState('Countdown aborted', 'warn');
+    renderLaunch();
+    return;
+  }
+  await abortController();
+}
+
+async function armWithCode(code) {
+  await sendBle({ cmd: 'arm', code });
+  launchCodeMemory = code;
+  clearVisibleCode();
+  renderLaunch();
+}
+
+async function disarmController() {
+  await sendBle({ cmd: 'disarm' });
+  stopLaunchHeartbeat();
+  cancelLaunchSpeech();
+  stopLaunchCountdownUi('Disarmed');
+  clearLaunchCredential();
+  broadcastLaunch({ type: 'abort', reason: 'Disarmed', mode: 'ble' });
+  renderLaunch();
+}
+
+async function startCountdownWithCode(seconds, code) {
+  await sendBle({ cmd: 'countdown_start', seconds, code });
+  launchCountdownEndsAt = Date.now() + seconds * 1000;
+  launchCountdownActive = true;
+  launchLastSpokenSecond = null;
+  launchCodeMemory = code;
+  persistActiveLaunch();
+  broadcastLaunch({ type: 'countdown_start', seconds, endsAt: launchCountdownEndsAt, mode: 'ble' });
+  startLaunchHeartbeat();
+  runLaunchCountdownTick();
+  clearInterval(launchCountdownTimer);
+  launchCountdownTimer = setInterval(runLaunchCountdownTick, 150);
+  renderLaunch();
+}
+
+async function abortController() {
   const wasActive = launchCountdownActive;
   stopLaunchHeartbeat();
   cancelLaunchSpeech();
@@ -289,6 +362,8 @@ function stopLaunchCountdownUi(reason) {
 }
 
 async function sendBle(payload) {
+  const pb = parentBle();
+  if (pb) return pb.send(payload);
   if (!bleCommand || !bleConnected) throw new Error('BLE not connected');
   const body = JSON.stringify({ ...payload, sid: BLE_SESSION, seq: Date.now() });
   try {
@@ -323,8 +398,9 @@ function applyBleStatus(s) {
 }
 
 function renderLaunch() {
-  const status = bleStatusData || readStoredBleStatus() || {};
-  const linked = bleConnected;
+  const pb = parentBle();
+  const status = pb ? pb.status() : (bleStatusData || readStoredBleStatus() || {});
+  const linked = pb ? pb.connected() : bleConnected;
   const armed = !!status.armed;
   const locked = !!status.locked;
   const checklistReady = allLaunchChecks();
@@ -335,8 +411,8 @@ function renderLaunch() {
 
   const connect = el('ble-connect');
   if (connect) {
-    connect.disabled = linked || !bluetoothSupported;
-    connect.textContent = bleLastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE';
+    connect.disabled = linked || (!bluetoothSupported && !pb);
+    connect.textContent = pb ? (linked ? 'BLE Linked' : 'Connect Shell BLE') : (bleLastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE');
   }
   const disconnect = el('ble-disconnect');
   if (disconnect) disconnect.disabled = !linked;
@@ -504,7 +580,7 @@ function speakLaunchSecond(second) {
       const voice = voices.find(v => /^en[-_]/i.test(v.lang)) || voices[0];
       if (voice) utterance.voice = voice;
       utterance.lang = (voice && voice.lang) || 'en-US';
-      utterance.rate = 1;
+      utterance.rate = 1.28;
       utterance.pitch = second <= 3 ? 1.18 : 1;
       utterance.volume = 1;
       speechSynthesis.cancel();
@@ -574,6 +650,13 @@ function readStoredBleStatus() {
 
 function hasBluetooth() {
   return typeof navigator !== 'undefined' && !!navigator.bluetooth;
+}
+
+function parentBle() {
+  try {
+    if (window.parent && window.parent !== window && window.parent.NeoLabsBLE) return window.parent.NeoLabsBLE;
+  } catch (_) {}
+  return null;
 }
 
 function makeSessionId() {
