@@ -141,6 +141,20 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .err-banner{background:rgba(255,74,61,.08);border:1px solid rgba(255,74,61,.3);border-radius:10px;
   padding:12px 16px;font-size:.8em;color:var(--red);letter-spacing:.04em;margin-bottom:16px;display:none}
 
+.net-banner{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  background:rgba(77,159,255,.07);border:1px solid rgba(77,159,255,.24);border-radius:10px;
+  padding:10px 14px;margin-bottom:16px;font-size:.78em;color:var(--silver);letter-spacing:.03em}
+.net-banner>div{display:flex;align-items:center;gap:9px;font-weight:700;text-transform:uppercase;font-size:.82em;letter-spacing:.12em}
+.net-banner.ok{border-color:rgba(54,240,160,.28);background:rgba(54,240,160,.06)}
+.net-banner.warn{border-color:rgba(255,179,71,.35);background:rgba(255,179,71,.08)}
+.net-banner.bad{border-color:rgba(255,74,61,.35);background:rgba(255,74,61,.08)}
+.net-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);box-shadow:0 0 8px var(--blue);flex-shrink:0}
+.net-banner.ok .net-dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+.net-banner.warn .net-dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.net-banner.bad .net-dot{background:var(--red);box-shadow:0 0 8px var(--red)}
+#net-detail{color:var(--muted);text-align:right}
+@media(max-width:700px){.net-banner{align-items:flex-start;flex-direction:column}#net-detail{text-align:left}}
+
 .settings-btn{background:none;border:1px solid var(--border);border-radius:8px;
   padding:6px 10px;cursor:pointer;color:var(--muted);font-size:1.05em;line-height:1;
   transition:color .2s,border-color .2s}

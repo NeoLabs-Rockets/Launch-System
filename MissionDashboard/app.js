@@ -2,6 +2,12 @@ const AUTO_REFRESH_MS = 5 * 60 * 1000;
 const RENDER_REFRESH_MS = 60 * 1000;
 const PROFILE_STORAGE_KEY = 'neolabs.missionDashboard.rocketProfiles';
 const LEGACY_PROFILE_KEY = 'neolabs.missionDashboard.rocketProfile';
+const WEATHER_CACHE_KEY = 'neolabs.missionDashboard.weatherCache';
+const AIRCRAFT_CACHE_KEY = 'neolabs.missionDashboard.aircraftCache';
+const CACHE_LOCATION_TOLERANCE_KM = 12;
+const WEATHER_CACHE_MAX_AGE_MS = 45 * 60 * 1000;
+const AIRCRAFT_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+const RETRY_DELAYS_MS = [250, 700, 1500];
 
 let userLat = null;
 let userLon = null;
@@ -9,9 +15,15 @@ let weather = null;
 let aircraft = [];
 let aircraftStatus = 'init';
 let aircraftLastUpdate = null;
+let weatherStatus = 'init';
+let weatherLastUpdate = null;
 let fullRefreshTimer = null;
 let renderRefreshTimer = null;
 const ignoredFactors = new Set();
+const feedState = {
+  weather: { status: 'init', attempts: 0, lastError: null, source: 'none' },
+  aircraft: { status: 'init', attempts: 0, lastError: null, source: 'none' }
+};
 
 const MOTOR_CLASS_SPECS = {
   '1/2A': { impulseNs: 0.94, burnTimeS: 0.8 },
@@ -42,14 +54,18 @@ window.addEventListener('DOMContentLoaded', () => {
   startClock();
   setupSettingsUI();
   setupRefreshControls();
+  setupNetworkAwareness();
   renderRocketModel();
   renderStatus();
+  renderDataLink();
   load('load-txt', 'Acquiring location…');
 
   navigator.geolocation.getCurrentPosition(
     async pos => {
       userLat = pos.coords.latitude;
       userLon = pos.coords.longitude;
+      hydrateCachedLiveData();
+      renderAll();
       reverseGeocode();
       await refresh();
       startAutoRefresh();
@@ -57,6 +73,7 @@ window.addEventListener('DOMContentLoaded', () => {
     },
     () => {
       showErr('Location access denied — please allow location and reload.');
+      hydrateCachedLiveData(false);
       renderAll();
       startRenderRefreshOnly();
       hideLoader();
@@ -85,6 +102,146 @@ function clearErr() {
   const el = document.getElementById('err-banner');
   el.textContent = '';
   el.style.display = 'none';
+}
+
+function setupNetworkAwareness() {
+  window.addEventListener('online', () => {
+    renderDataLink();
+    refresh();
+  });
+  window.addEventListener('offline', renderDataLink);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh();
+  });
+}
+
+function timeoutSignal(ms) {
+  if (window.AbortSignal?.timeout) return AbortSignal.timeout(ms);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl.signal;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchJsonWithRetry(url, opts = {}) {
+  const retries = opts.retries ?? RETRY_DELAYS_MS.length;
+  const timeoutMs = opts.timeoutMs ?? 6500;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const r = await fetch(url, {
+        ...opts,
+        signal: timeoutSignal(timeoutMs),
+        cache: opts.cache || 'no-store'
+      });
+      if (!r.ok) {
+        const err = new Error(`HTTP ${r.status}`);
+        err.status = r.status;
+        throw err;
+      }
+      return { data: await r.json(), attempts: attempt + 1 };
+    } catch (err) {
+      lastError = err;
+      if (attempt >= retries) break;
+      await sleep(RETRY_DELAYS_MS[attempt] || 1000);
+    }
+  }
+
+  throw lastError || new Error('request failed');
+}
+
+function readCache(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || 'null');
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCache(key, payload) {
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch (_) {}
+}
+
+function cacheMatchesLocation(entry, maxAgeMs) {
+  if (!entry?.data || !entry.ts) return false;
+  if (Date.now() - entry.ts > maxAgeMs) return false;
+  if (userLat == null || userLon == null || entry.lat == null || entry.lon == null) return true;
+  return haversine(userLat, userLon, entry.lat, entry.lon) <= CACHE_LOCATION_TOLERANCE_KM;
+}
+
+function hydrateCachedLiveData(requireLocation = true) {
+  if (requireLocation && (userLat == null || userLon == null)) return false;
+  let used = false;
+  const wx = readCache(WEATHER_CACHE_KEY);
+  if (cacheMatchesLocation(wx, WEATHER_CACHE_MAX_AGE_MS)) {
+    weather = wx.data;
+    weatherLastUpdate = new Date(wx.ts);
+    weatherStatus = 'cached';
+    feedState.weather = { status: 'cached', attempts: 0, lastError: null, source: 'cache' };
+    used = true;
+  }
+  const ac = readCache(AIRCRAFT_CACHE_KEY);
+  if (cacheMatchesLocation(ac, AIRCRAFT_CACHE_MAX_AGE_MS)) {
+    aircraft = ac.data || [];
+    aircraftLastUpdate = new Date(ac.ts);
+    aircraftStatus = 'cached';
+    feedState.aircraft = { status: 'cached', attempts: 0, lastError: null, source: 'cache' };
+    used = true;
+  }
+  if (used) renderDataLink();
+  return used;
+}
+
+function setFeedState(feed, patch) {
+  feedState[feed] = { ...feedState[feed], ...patch };
+  renderDataLink();
+}
+
+function renderDataLink() {
+  const banner = document.getElementById('net-banner');
+  if (!banner) return;
+  const title = document.getElementById('net-title');
+  const detail = document.getElementById('net-detail');
+  const states = [feedState.weather.status, feedState.aircraft.status];
+  const online = navigator.onLine !== false;
+  const retrying = states.includes('retrying');
+  const cached = states.includes('cached') || states.includes('stale');
+  const failed = states.includes('error') || !online;
+
+  banner.className = 'net-banner ' + (failed ? 'bad' : cached || retrying ? 'warn' : 'ok');
+  if (!online) title.textContent = 'Offline';
+  else if (retrying) title.textContent = 'Retrying feeds';
+  else if (cached) title.textContent = 'Using cached data';
+  else if (states.every(s => s === 'ok')) title.textContent = 'Live data link';
+  else title.textContent = 'Data link starting';
+
+  const parts = [];
+  parts.push(describeFeed('Weather', feedState.weather, weatherLastUpdate));
+  parts.push(describeFeed('Airspace', feedState.aircraft, aircraftLastUpdate));
+  detail.textContent = parts.filter(Boolean).join(' | ');
+}
+
+function describeFeed(label, state, ts) {
+  if (state.status === 'ok') return `${label} live${state.attempts > 1 ? ` after ${state.attempts} tries` : ''}`;
+  if (state.status === 'retrying') return `${label} retrying`;
+  if (state.status === 'cached') return `${label} cached ${fmtAge(ts)}`;
+  if (state.status === 'ratelimited') return `${label} rate-limited, cached ${fmtAge(ts)}`;
+  if (state.status === 'error') return `${label} unavailable${ts ? `, cached ${fmtAge(ts)}` : ''}`;
+  return `${label} pending`;
+}
+
+function fmtAge(ts) {
+  if (!ts) return 'data';
+  const mins = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  return `${Math.round(mins / 60)} h ago`;
 }
 
 function startClock() {
@@ -144,49 +301,82 @@ async function fetchWeather() {
     + `?latitude=${userLat}&longitude=${userLon}`
     + `&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m`
     + `&hourly=uv_index&daily=sunrise,sunset&forecast_days=1&timezone=auto`;
+  setFeedState('weather', { status: 'retrying', lastError: null, source: 'network' });
   try {
-    const r = await fetch(url);
-    weather = await r.json();
+    const result = await fetchJsonWithRetry(url, { timeoutMs: 5500 });
+    weather = result.data;
+    weatherStatus = 'ok';
+    weatherLastUpdate = new Date();
+    setFeedState('weather', { status: 'ok', attempts: result.attempts, lastError: null, source: 'network' });
+    writeCache(WEATHER_CACHE_KEY, {
+      ts: weatherLastUpdate.getTime(),
+      lat: userLat,
+      lon: userLon,
+      data: weather
+    });
     clearErr();
-  } catch (_) {
-    showErr('Weather fetch failed — retrying at next refresh.');
+  } catch (err) {
+    const cached = readCache(WEATHER_CACHE_KEY);
+    if (cacheMatchesLocation(cached, WEATHER_CACHE_MAX_AGE_MS)) {
+      weather = cached.data;
+      weatherStatus = 'cached';
+      weatherLastUpdate = new Date(cached.ts);
+      setFeedState('weather', { status: 'cached', attempts: RETRY_DELAYS_MS.length + 1, lastError: err.message, source: 'cache' });
+    } else {
+      weatherStatus = 'error';
+      setFeedState('weather', { status: 'error', attempts: RETRY_DELAYS_MS.length + 1, lastError: err.message, source: 'none' });
+      showErr('Weather feed unavailable. Check connection; dashboard will retry automatically.');
+    }
   }
 }
-
 async function fetchAircraft() {
   if (userLat == null || userLon == null) return;
   const distNm = 44;
   const url = `/api/aircraft?lat=${userLat.toFixed(4)}&lon=${userLon.toFixed(4)}&dist=${distNm}`;
+  setFeedState('aircraft', { status: 'retrying', lastError: null, source: 'network' });
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (r.status === 429) {
-      aircraftStatus = 'ratelimited';
-      return;
+    const result = await fetchJsonWithRetry(url, { timeoutMs: 7000 });
+    const data = result.data;
+    aircraft = normalizeAircraft(data.ac || []);
+    aircraftStatus = data.cached ? 'cached' : 'ok';
+    aircraftLastUpdate = data.cachedAt ? new Date(data.cachedAt) : new Date();
+    setFeedState('aircraft', { status: aircraftStatus, attempts: result.attempts, lastError: null, source: data.cached ? 'cache' : 'network' });
+    writeCache(AIRCRAFT_CACHE_KEY, {
+      ts: aircraftLastUpdate.getTime(),
+      lat: userLat,
+      lon: userLon,
+      data: aircraft
+    });
+  } catch (err) {
+    const status = err?.status === 429 ? 'ratelimited' : 'error';
+    const cached = readCache(AIRCRAFT_CACHE_KEY);
+    if (cacheMatchesLocation(cached, AIRCRAFT_CACHE_MAX_AGE_MS)) {
+      aircraft = cached.data || [];
+      aircraftStatus = status === 'ratelimited' ? 'ratelimited' : 'cached';
+      aircraftLastUpdate = new Date(cached.ts);
+      setFeedState('aircraft', { status: aircraftStatus, attempts: RETRY_DELAYS_MS.length + 1, lastError: err.message, source: 'cache' });
+    } else {
+      aircraftStatus = status;
+      setFeedState('aircraft', { status, attempts: RETRY_DELAYS_MS.length + 1, lastError: err.message, source: 'none' });
     }
-    if (!r.ok) {
-      aircraftStatus = 'error';
-      return;
-    }
-    const data = await r.json();
-    aircraft = (data.ac || [])
-      .filter(a => a.lat != null && a.lon != null && a.alt_baro !== 'ground')
-      .map(a => ({
-        icao: a.hex,
-        call: (a.flight || '').trim() || a.hex.toUpperCase(),
-        country: a.r || '—',
-        lon: a.lon,
-        lat: a.lat,
-        alt: a.alt_baro != null && a.alt_baro !== 'ground' ? a.alt_baro * 0.3048 : null,
-        spd: a.gs != null ? a.gs * 0.514444 : null,
-        hdg: a.track ?? a.mag_heading,
-        dist: haversine(userLat, userLon, a.lat, a.lon)
-      }))
-      .sort((a, b) => a.dist - b.dist);
-    aircraftStatus = 'ok';
-    aircraftLastUpdate = new Date();
-  } catch (_) {
-    aircraftStatus = 'error';
   }
+}
+
+function normalizeAircraft(list) {
+  return list
+    .filter(a => a.lat != null && a.lon != null && a.alt_baro !== 'ground')
+    .map(a => ({
+      icao: a.hex,
+      call: (a.flight || '').trim() || String(a.hex || '').toUpperCase(),
+      country: a.r || '-',
+      lon: a.lon,
+      lat: a.lat,
+      alt: a.alt_baro != null && a.alt_baro !== 'ground' ? a.alt_baro * 0.3048 : null,
+      spd: a.gs != null ? a.gs * 0.514444 : null,
+      hdg: a.track ?? a.mag_heading,
+      dist: haversine(userLat, userLon, a.lat, a.lon)
+    }))
+    .sort((a, b) => a.dist - b.dist);
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -632,6 +822,7 @@ function renderAll() {
   }
   renderAircraft();
   renderStatus();
+  renderDataLink();
   document.getElementById('footer-ts').textContent =
     `NeoLabs Rockets · Mission Dashboard · Live refresh ${Math.round(AUTO_REFRESH_MS / 60000)} min · Last render ${new Date().toLocaleTimeString()}`;
 }
@@ -666,7 +857,9 @@ function renderWeather() {
   const wx = wmoInfo(c.weather_code);
   document.getElementById('wx-icon').textContent = wx.icon;
   document.getElementById('wx-temp').textContent = Math.round(c.temperature_2m);
-  document.getElementById('wx-desc').textContent = wx.label;
+  document.getElementById('wx-desc').textContent = weatherStatus === 'ok'
+    ? wx.label
+    : `${wx.label} (cached ${fmtAge(weatherLastUpdate)})`;
   document.getElementById('wx-cloud').textContent = `${c.cloud_cover}%`;
   document.getElementById('wx-precip').textContent = c.precipitation > 0 ? `${c.precipitation} mm` : 'None';
   document.getElementById('wx-vis').textContent = visFromCode(c.weather_code);
@@ -785,8 +978,9 @@ function renderAircraft() {
   const wrap = document.getElementById('ac-table-wrap');
 
   let statusTxt = '';
-  if (aircraftStatus === 'ratelimited') statusTxt = 'Airspace feed rate-limited · ';
-  else if (aircraftStatus === 'error') statusTxt = 'Airspace data unavailable · ';
+  if (aircraftStatus === 'ratelimited') statusTxt = 'Airspace feed rate-limited | ';
+  else if (aircraftStatus === 'cached') statusTxt = `Airspace cached ${fmtAge(aircraftLastUpdate)} | `;
+  else if (aircraftStatus === 'error') statusTxt = 'Airspace data unavailable | ';
 
   const updTxt = aircraftLastUpdate
     ? `Updated ${aircraftLastUpdate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
@@ -840,31 +1034,32 @@ function renderStatus() {
 
   if (weather) {
     const c = weather.current;
+    const feedPenalty = weatherStatus === 'ok' ? 'go' : 'marginal';
     const daylight = getDaylightWindow();
     const wx = evaluateWeatherWindow(c, model);
     factors.push({
       id: 'safe-wind',
       n: 'Safe Wind',
       v: `${Math.round(c.wind_speed_10m)} / ${Math.round(model.safeWindKph)} km/h`,
-      s: compareMetric(c.wind_speed_10m, model.safeWindKph, 1.15)
+      s: worseStatus(compareMetric(c.wind_speed_10m, model.safeWindKph, 1.15), feedPenalty)
     });
     factors.push({
       id: 'gust-margin',
       n: 'Gust Margin',
       v: `${Math.round(c.wind_gusts_10m)} / ${Math.round(model.gustLimitKph)} km/h`,
-      s: compareMetric(c.wind_gusts_10m, model.gustLimitKph, 1.1)
+      s: worseStatus(compareMetric(c.wind_gusts_10m, model.gustLimitKph, 1.1), feedPenalty)
     });
     factors.push({
       id: 'recovery-drift',
       n: 'Recovery Drift',
       v: `${model.currentDriftKm.toFixed(1)} / ${(model.profile.recoveryRadiusM / 1000).toFixed(1)} km`,
-      s: compareMetric(model.currentDriftM, model.profile.recoveryRadiusM, 1.15)
+      s: worseStatus(compareMetric(model.currentDriftM, model.profile.recoveryRadiusM, 1.15), feedPenalty)
     });
     factors.push({
       id: 'weather-window',
       n: 'Weather Window',
       v: wx.value,
-      s: wx.status
+      s: worseStatus(wx.status, feedPenalty)
     });
     factors.push({
       id: 'daylight-window',
@@ -872,11 +1067,11 @@ function renderStatus() {
       v: daylight?.isDaytime
         ? `${fmtDuration(daylight.leftMs / 1000)} left · need ${fmtDuration(model.requiredDaylightS)}`
         : `Need ${fmtDuration(model.requiredDaylightS)} of daylight`,
-      s: !daylight ? 'marginal'
+      s: worseStatus(!daylight ? 'marginal'
         : !daylight.isDaytime ? 'nogo'
         : daylight.leftMs / 1000 >= model.requiredDaylightS ? 'go'
         : daylight.leftMs / 1000 >= model.missionDurationS ? 'marginal'
-        : 'nogo'
+        : 'nogo', feedPenalty)
     });
   } else {
     factors.push({ id: 'weather-window', n: 'Weather Window', v: 'Waiting for forecast', s: 'marginal' });
@@ -912,8 +1107,14 @@ function toggleIgnoredFactor(factorId) {
 }
 
 function evaluateAirspace(model) {
+  if (aircraftStatus === 'cached' || aircraftStatus === 'ratelimited') {
+    return {
+      status: 'marginal',
+      value: `Using cached airspace ${fmtAge(aircraftLastUpdate)}`
+    };
+  }
   if (aircraftStatus !== 'ok') {
-    return { status: 'marginal', value: `Need ${model.airspaceKeepoutKm.toFixed(1)} km clear corridor` };
+    return { status: 'marginal', value: `Need fresh ${model.airspaceKeepoutKm.toFixed(1)} km clear corridor` };
   }
   const immediate = aircraft.filter(a =>
     a.dist <= model.airspaceKeepoutKm &&
