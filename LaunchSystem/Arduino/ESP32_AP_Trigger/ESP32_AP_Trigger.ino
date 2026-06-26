@@ -49,6 +49,7 @@
 #define BUZZ_MS      120UL   // default vibration pulse (per countdown step)
 #define BUZZ_MAX    5000UL   // hard cap on any single vibration pulse
 #define COUNTDOWN_CLIENT_TIMEOUT_MS 3000UL // abort if the launch page stops heartbeating
+#define BLE_LINK_TIMEOUT_MS 5000UL // safety fallback if an armed BLE session disappears
 
 // Haptic feedback
 #define ARM_BUZZ_MS                 450UL
@@ -66,12 +67,19 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <NimBLEDevice.h>
 
 WebServer server(80);
 DNSServer dnsServer;
 
+static NimBLEUUID BLE_SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
+static NimBLEUUID BLE_COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
+static NimBLEUUID BLE_STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
+NimBLECharacteristic* bleStatusChar = nullptr;
+
 const byte DNS_PORT = 53;
 IPAddress apIP(192, 168, 4, 1);
+const char BLE_NAME[] = "NeoLabs Launch Controller";
 
 bool          armed         = false;
 bool          triggerActive = false;
@@ -85,12 +93,20 @@ unsigned long motorOff      = 0;        // millis() at which to switch it off
 unsigned long lastArmedBuzz = 0;        // last idle armed reminder buzz
 
 void buzz(unsigned long ms);
+void publishBleStatus();
+bool countdownFresh();
+void restartBleAdvertising();
 
 int           lastBtnRead   = HIGH;
 unsigned long lastDebounce  = 0;
 
 bool          countdownActive = false;  // true while a browser-owned countdown is live
 unsigned long countdownLastBeat = 0;    // last browser heartbeat during countdown
+String        activeBleSid = "";
+String        lastBleError = "";
+int           bleConnectedCount = 0;
+unsigned long lastBleActivity = 0;
+unsigned long lastBleStatusNotify = 0;
 
 // ─── Embedded web UI ─────────────────────────────────────────────────────────
 static const char HTML_PAGE[] = R"HTMLPAGE(<!DOCTYPE html>
@@ -737,6 +753,187 @@ void sendJSON(int code, const char* body) {
   server.send(code, "application/json", body);
 }
 
+String jsonString(const String& src, const char* key) {
+  String pat = String("\"") + key + "\":\"";
+  int i = src.indexOf(pat);
+  if (i < 0) return "";
+  i += pat.length();
+  int e = src.indexOf("\"", i);
+  return e < 0 ? "" : src.substring(i, e);
+}
+
+bool bleCodeOk(const String& body) {
+  return jsonString(body, "code") == ARM_CODE;
+}
+
+bool bleSidAllowed(const String& sid) {
+  return activeBleSid.length() == 0 || sid == activeBleSid;
+}
+
+void bleSafeAbort(const char* reason, unsigned long buzzMs) {
+  armed = false;
+  countdownActive = false;
+  activeBleSid = "";
+  lastBleError = reason;
+  buzz(buzzMs);
+}
+
+void publishBleStatus() {
+  if (!bleStatusChar) return;
+  char buf[190];
+  snprintf(buf, sizeof(buf),
+    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\"}",
+    armed ? 1 : 0,
+    triggerActive ? 1 : 0,
+    countdownActive ? 1 : 0,
+    lockedOut ? 1 : 0,
+    lockedOut ? 0 : (MAX_ATTEMPTS - armAttempts),
+    bleConnectedCount,
+    millis(),
+    lastBleError.c_str()
+  );
+  bleStatusChar->setValue((uint8_t*)buf, strlen(buf));
+  bleStatusChar->notify();
+  lastBleStatusNotify = millis();
+}
+
+class HybridBleServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) override {
+    bleConnectedCount++;
+    lastBleActivity = millis();
+    restartBleAdvertising();
+    publishBleStatus();
+  }
+
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
+    if (bleConnectedCount > 0) bleConnectedCount--;
+    if (activeBleSid.length() > 0 && (armed || countdownActive)) {
+      bleSafeAbort("ble_disconnect", LINK_LOST_BUZZ_MS);
+    }
+    restartBleAdvertising();
+    publishBleStatus();
+  }
+};
+
+class HybridBleCommandCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
+    String body = characteristic->getValue().c_str();
+    String cmd = jsonString(body, "cmd");
+    String sid = jsonString(body, "sid");
+    lastBleActivity = millis();
+    lastBleError = "";
+
+    if (cmd == "status") { publishBleStatus(); return; }
+    if (cmd == "abort") { bleSafeAbort("abort", ABORT_BUZZ_MS); publishBleStatus(); return; }
+    if (cmd == "disarm") {
+      armed = false;
+      countdownActive = false;
+      activeBleSid = "";
+      lastBleError = "";
+      buzz(DISARM_BUZZ_MS);
+      publishBleStatus();
+      return;
+    }
+
+    if (lockedOut) { lastBleError = "locked"; publishBleStatus(); return; }
+
+    if (cmd == "arm") {
+      if (!bleCodeOk(body)) {
+        armAttempts++;
+        buzz(armAttempts >= MAX_ATTEMPTS ? LOCKOUT_BUZZ_MS : WRONG_CODE_BUZZ_MS);
+        if (armAttempts >= MAX_ATTEMPTS) lockedOut = true;
+        lastBleError = "bad_code";
+        publishBleStatus();
+        return;
+      }
+      armAttempts = 0;
+      armed = true;
+      countdownActive = false;
+      activeBleSid = sid;
+      lastBleError = "";
+      lastArmedBuzz = millis();
+      buzz(ARM_BUZZ_MS);
+      publishBleStatus();
+      return;
+    }
+
+    if (!bleSidAllowed(sid)) { lastBleError = "not_owner"; publishBleStatus(); return; }
+
+    if (cmd == "countdown_start") {
+      if (!bleCodeOk(body)) { lastBleError = "code_required"; publishBleStatus(); return; }
+      if (!armed || triggerActive) {
+        lastBleError = !armed ? "not_armed" : "trigger_active";
+        publishBleStatus();
+        return;
+      }
+      countdownActive = true;
+      countdownLastBeat = millis();
+      buzz(COUNTDOWN_START_BUZZ_MS);
+      publishBleStatus();
+      return;
+    }
+
+    if (cmd == "heartbeat") {
+      if (armed && countdownActive) countdownLastBeat = millis();
+      publishBleStatus();
+      return;
+    }
+
+    if (cmd == "trigger") {
+      if (!bleCodeOk(body)) { lastBleError = "code_required"; publishBleStatus(); return; }
+      if (!armed) { lastBleError = "not_armed"; publishBleStatus(); return; }
+      if (!countdownFresh()) { bleSafeAbort("heartbeat_lost", LINK_LOST_BUZZ_MS); publishBleStatus(); return; }
+      digitalWrite(TRIGGER_PIN, HIGH);
+      buzz(TRIGGER_BUZZ_MS);
+      triggerActive = true;
+      triggerStart  = millis();
+      armed         = false;
+      countdownActive = false;
+      activeBleSid = "";
+      Serial.println("[TRIGGER] BLE pulse started");
+      publishBleStatus();
+      return;
+    }
+
+    lastBleError = "unknown_cmd";
+    publishBleStatus();
+  }
+};
+
+void setupBLE() {
+  NimBLEDevice::init(BLE_NAME);
+  NimBLEDevice::setMTU(185);
+  NimBLEDevice::setPower(9);
+  NimBLEServer* bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new HybridBleServerCallbacks());
+
+  NimBLEService* bleService = bleServer->createService(BLE_SERVICE_UUID);
+  NimBLECharacteristic* bleCommandChar = bleService->createCharacteristic(
+    BLE_COMMAND_UUID,
+    NIMBLE_PROPERTY::WRITE
+  );
+  bleCommandChar->setCallbacks(new HybridBleCommandCallbacks());
+
+  bleStatusChar = bleService->createCharacteristic(
+    BLE_STATUS_UUID,
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+  );
+  bleService->start();
+
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->enableScanResponse(true);
+  advertising->setName(BLE_NAME);
+  advertising->start();
+  Serial.println("[OK] BLE advertising - NeoLabs Launch Controller");
+  publishBleStatus();
+}
+
+void restartBleAdvertising() {
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  if (advertising) advertising->start();
+}
+
 // ─── Route handlers ──────────────────────────────────────────────────────────
 void handleRoot() {
   setCORSHeaders();
@@ -789,10 +986,14 @@ void handleArm() {
       lockedOut = true;
       buzz(LOCKOUT_BUZZ_MS);
       Serial.println("[SECURITY] Locked out after too many wrong codes");
+      lastBleError = "locked";
+      publishBleStatus();
       sendJSON(423, "{\"ok\":false,\"error\":\"locked out\"}");
       return;
     }
     buzz(WRONG_CODE_BUZZ_MS);
+    lastBleError = "bad_code";
+    publishBleStatus();
     char buf[80];
     snprintf(buf, sizeof(buf),
       "{\"ok\":false,\"error\":\"invalid code\",\"attempts_left\":%d}",
@@ -804,14 +1005,20 @@ void handleArm() {
   armAttempts = 0;   // reset counter on success
   armed = true;
   countdownActive = false;
+  activeBleSid = "";
+  lastBleError = "";
   lastArmedBuzz = millis();
   buzz(ARM_BUZZ_MS);
+  publishBleStatus();
   sendJSON(200, "{\"ok\":true,\"armed\":true}");
 }
 void handleDisarm() {
   armed = false;
   countdownActive = false;
+  activeBleSid = "";
+  lastBleError = "";
   buzz(DISARM_BUZZ_MS);
+  publishBleStatus();
   sendJSON(200, "{\"ok\":true,\"armed\":false}");
 }
 
@@ -824,7 +1031,10 @@ void handleCountdownStart() {
   if (triggerActive) { sendJSON(409, "{\"ok\":false,\"error\":\"trigger already active\"}"); return; }
   countdownActive = true;
   countdownLastBeat = millis();
+  activeBleSid = "";
+  lastBleError = "";
   buzz(COUNTDOWN_START_BUZZ_MS);
+  publishBleStatus();
   sendJSON(200, "{\"ok\":true}");
 }
 
@@ -839,7 +1049,10 @@ void handleCountdownHeartbeat() {
 
 void handleCountdownAbort() {
   countdownActive = false;
+  activeBleSid = "";
+  lastBleError = "abort";
   buzz(ABORT_BUZZ_MS);
+  publishBleStatus();
   sendJSON(200, "{\"ok\":true}");
 }
 
@@ -849,7 +1062,10 @@ void handleTrigger() {
   if (!countdownFresh()) {
     countdownActive = false;
     armed = false;
+    activeBleSid = "";
+    lastBleError = "heartbeat_lost";
     buzz(LINK_LOST_BUZZ_MS);
+    publishBleStatus();
     sendJSON(409, "{\"ok\":false,\"error\":\"live countdown link lost\"}");
     return;
   }
@@ -859,7 +1075,10 @@ void handleTrigger() {
   triggerStart  = millis();
   armed         = false;
   countdownActive = false;
+  activeBleSid = "";
+  lastBleError = "";
   Serial.println("[TRIGGER] Pulse started");
+  publishBleStatus();
   sendJSON(200, "{\"ok\":true}");
 }
 
@@ -910,8 +1129,11 @@ void checkArmButton() {
           buzz(ARM_BUZZ_MS);
         } else {
           countdownActive = false;
+          activeBleSid = "";
+          lastBleError = "";
           buzz(DISARM_BUZZ_MS);
         }
+        publishBleStatus();
         Serial.printf("[ARM_BTN] %s\n", armed ? "ARMED" : "DISARMED");
       }
     }
@@ -965,6 +1187,7 @@ void setup() {
   server.on("/api/buzz",                 HTTP_POST, handleBuzz);
   server.onNotFound(handleNotFound);
   server.begin();
+  setupBLE();
   Serial.println("[OK] Web server started - open http://192.168.4.1/ in a browser");
 }
 
@@ -978,13 +1201,24 @@ void loop() {
     digitalWrite(TRIGGER_PIN, LOW);
     triggerActive = false;
     Serial.println("[TRIGGER] Pulse complete");
+    publishBleStatus();
   }
 
   if (countdownActive && (millis() - countdownLastBeat > COUNTDOWN_CLIENT_TIMEOUT_MS)) {
     countdownActive = false;
     armed = false;
+    activeBleSid = "";
+    lastBleError = "heartbeat_lost";
     buzz(LINK_LOST_BUZZ_MS);
     Serial.println("[COUNTDOWN] Heartbeat lost, countdown aborted and system disarmed");
+    publishBleStatus();
+  }
+
+  if (activeBleSid.length() > 0 && bleConnectedCount == 0 && (armed || countdownActive) &&
+      (millis() - lastBleActivity > BLE_LINK_TIMEOUT_MS)) {
+    bleSafeAbort("ble_link_lost", LINK_LOST_BUZZ_MS);
+    Serial.println("[BLE] Active session disappeared, system disarmed");
+    publishBleStatus();
   }
 
   if (armed && !countdownActive && !triggerActive && !motorActive &&
@@ -1002,5 +1236,9 @@ void loop() {
   if (STATUS_LED >= 0) {
     bool ledOn = triggerActive ? ((millis() / 100) % 2 == 0) : armed;
     digitalWrite(STATUS_LED, ledOn ? HIGH : LOW);
+  }
+
+  if (bleStatusChar && (millis() - lastBleStatusNotify >= 1000)) {
+    publishBleStatus();
   }
 }

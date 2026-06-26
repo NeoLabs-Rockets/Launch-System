@@ -38,6 +38,11 @@
     </div>
   </div>
   <div class="hdr-right">
+    <nav class="top-nav" aria-label="Mission tools">
+      <a href="/" class="active">Dashboard</a>
+      <a href="/finder.html">Location Finder</a>
+      <a href="/camera.html">Camera</a>
+    </nav>
     <div class="hdr-dot"></div>
     <div class="hdr-loc" id="hdr-loc">—</div>
     <div id="hdr-clock">—</div>
@@ -54,6 +59,70 @@
     </div>
     <span id="net-detail">Waiting for live weather and airspace feeds.</span>
   </div>
+
+  <section class="card launch-ble-card" id="launch-ble-card">
+    <div class="card-head">
+      <div>
+        <div class="lbl">Launch Controller</div>
+        <div class="launch-link-state" id="ble-state">Not connected</div>
+      </div>
+      <div class="launch-actions-top">
+        <div class="launch-mode-switch" role="tablist" aria-label="Controller link mode">
+          <button class="launch-mode-btn active" id="launch-mode-ble" type="button" role="tab" aria-selected="true">Bluetooth</button>
+          <button class="launch-mode-btn" id="launch-mode-wifi" type="button" role="tab" aria-selected="false">WiFi AP</button>
+        </div>
+        <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
+        <button class="sp-secondary" id="wifi-connect" type="button">Check WiFi</button>
+        <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
+      </div>
+    </div>
+    <div class="launch-grid">
+      <div class="launch-status-panel">
+        <div class="go-badge marginal" id="ble-go-badge">
+          <div class="go-label" id="ble-go-label">LINK</div>
+          <div class="go-sub">Controller</div>
+        </div>
+        <div class="launch-metrics">
+          <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div><div class="s">Password protected</div></div>
+          <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ble-countdown">Idle</div><div class="s" id="ble-countdown-sub">No active sequence</div></div>
+          <div class="derived-item"><div class="k">Clients</div><div class="v" id="ble-clients">0</div><div class="s" id="ble-clients-sub">Viewers depend on BLE stack/browser support</div></div>
+          <div class="derived-item"><div class="k">Attempts</div><div class="v" id="ble-attempts">-</div><div class="s">Lockout on repeated wrong code</div></div>
+        </div>
+      </div>
+
+      <div class="launch-command-panel">
+        <div class="launch-wifi-row" id="wifi-settings">
+          <div class="sp-field">
+            <label for="wifi-host">WiFi controller address</label>
+            <input id="wifi-host" type="url" spellcheck="false" value="http://192.168.4.1">
+          </div>
+        </div>
+        <div class="sp-row">
+          <div class="sp-field">
+            <label for="ble-code">Arming code</label>
+            <input id="ble-code" type="password" inputmode="numeric" maxlength="6" placeholder="123456">
+          </div>
+          <div class="sp-field">
+            <label for="ble-count-seconds">Countdown s</label>
+            <input id="ble-count-seconds" type="number" min="5" max="60" value="10">
+          </div>
+        </div>
+        <div class="launch-checks">
+          <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
+          <label><input type="checkbox" class="ble-check"> Checked mission control dashboard: aircraft, weather, launch location</label>
+          <label><input type="checkbox" class="ble-check"> Power lines, roads, buildings, and bystanders outside safety radius</label>
+          <label><input type="checkbox" class="ble-check"> Rocket secured, igniter connected, abort word understood</label>
+        </div>
+        <div class="launch-buttons">
+          <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
+          <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>
+          <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
+          <button class="sp-secondary danger" id="ble-abort" type="button" disabled>Abort</button>
+        </div>
+        <div class="finder-note" id="ble-note">Choose Bluetooth or the ESP32 WiFi AP. Arming always requires the checklist and code; active link loss during countdown forces a safe stop on the ESP32.</div>
+      </div>
+    </div>
+  </section>
 
   <div class="rocket-badge" id="rocket-badge" role="button" tabindex="0" aria-label="Edit rocket profile">
     <div class="rb-name" id="rocket-name">—</div>
@@ -351,5 +420,6 @@
 </aside>
 
 <script src="/app.js" defer></script>
+<script src="/bluetooth.js" defer></script>
 </body>
 </html>

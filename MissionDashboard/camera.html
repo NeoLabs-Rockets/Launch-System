@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeoLabs - Launch Camera</title>
+<link rel="stylesheet" href="/styles.css">
+<script defer src="/camera.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="hole" viewBox="0 0 100 100">
+      <defs>
+        <radialGradient id="gc" cx="50%" cy="50%" r="50%">
+          <stop offset="62%" stop-color="#000"/>
+          <stop offset="80%" stop-color="#0a1830"/>
+          <stop offset="100%" stop-color="#000"/>
+        </radialGradient>
+        <linearGradient id="gr" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#9fd4ff"/>
+          <stop offset="50%" stop-color="#4d9fff"/>
+          <stop offset="100%" stop-color="#1c4f9e"/>
+        </linearGradient>
+      </defs>
+      <ellipse cx="50" cy="50" rx="46" ry="13" fill="none" stroke="url(#gr)" stroke-width="2.4" opacity=".85"/>
+      <circle cx="50" cy="50" r="26" fill="url(#gc)"/>
+      <circle cx="50" cy="50" r="26" fill="none" stroke="url(#gr)" stroke-width="3"/>
+      <path d="M24 50a26 26 0 0 0 52 0" fill="none" stroke="#cfe9ff" stroke-width="1.6" opacity=".9"/>
+    </svg>
+    <div>
+      <div class="wm"><span class="neo">NEO</span><span class="labs">LABS</span></div>
+      <div class="tag">Rockets - Launch Camera</div>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <nav class="top-nav" aria-label="Mission tools">
+      <a href="/">Dashboard</a>
+      <a href="/finder.html">Location Finder</a>
+      <a href="/camera.html" class="active">Camera</a>
+    </nav>
+    <div class="hdr-dot"></div>
+    <div id="cam-clock">--:--:--</div>
+  </div>
+</header>
+
+<main class="camera-page">
+  <div id="cam-banner" class="net-banner warn">
+    <div><span class="net-dot"></span><span id="cam-status">Camera idle</span></div>
+    <span id="cam-detail">Allow camera and microphone access to record launch footage with overlay and sound.</span>
+  </div>
+
+  <section class="camera-layout">
+    <div class="camera-stage card">
+      <video id="cam-source" playsinline muted></video>
+      <canvas id="cam-canvas" width="1280" height="720"></canvas>
+    </div>
+
+    <aside class="card camera-controls">
+      <div class="lbl">Recorder</div>
+      <div class="cam-buttons">
+        <button class="sp-secondary" id="cam-start-preview" type="button">Open Camera</button>
+        <button class="sp-save" id="cam-record" type="button" disabled>Start Recording</button>
+        <button class="sp-secondary danger" id="cam-stop" type="button" disabled>Stop</button>
+      </div>
+      <button class="sp-secondary countdown-btn" id="cam-countdown" type="button" disabled>Start 30s Countdown</button>
+
+      <div class="sp-sec">Overlay</div>
+      <div class="sp-row full">
+        <div class="sp-field"><label for="cam-title">Title</label><input id="cam-title" value="NeoLabs Launch"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-site">Site</label><input id="cam-site" value="Launch Site"></div>
+        <div class="sp-field"><label for="cam-mission">Mission</label><input id="cam-mission" value="Flight Test"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-quality">Quality</label>
+          <select id="cam-quality">
+            <option value="1280x720">720p</option>
+            <option value="1920x1080">1080p</option>
+          </select>
+        </div>
+        <div class="sp-field"><label for="cam-facing">Camera</label>
+          <select id="cam-facing">
+            <option value="environment">Back</option>
+            <option value="user">Front</option>
+          </select>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-fps">FPS</label><input id="cam-fps" type="number" min="24" max="60" value="30"></div>
+        <div class="sp-field"><label for="cam-audio">Audio</label>
+          <select id="cam-audio">
+            <option value="on">Mic on</option>
+            <option value="off">Mic off</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="sp-sec">Recording State</div>
+      <div class="sp-derived">
+        <div class="sp-dr"><span class="sp-dk">Duration</span><span class="sp-dv" id="cam-duration">00:00</span></div>
+        <div class="sp-dr"><span class="sp-dk">Countdown</span><span class="sp-dv" id="cam-count-state">Idle</span></div>
+        <div class="sp-dr"><span class="sp-dk">Audio</span><span class="sp-dv" id="cam-audio-state">Pending</span></div>
+        <div class="sp-dr"><span class="sp-dk">Download</span><span class="sp-dv" id="cam-download">None</span></div>
+      </div>
+      <div class="finder-note cam-note">The downloaded file contains the canvas overlay and microphone audio when permission is granted.</div>
+    </aside>
+  </section>
+</main>
+</body>
+</html>

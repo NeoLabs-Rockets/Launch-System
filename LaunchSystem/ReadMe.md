@@ -5,7 +5,33 @@ WiFi Access Point and serves a NeoLabs-branded web UI with an **arm â†’ lau
 workflow, a 10-second voice countdown, and a REST API. Designed to run off a 9V
 battery for portable use.
 
-> Firmware: [`Arduino/ESP32_AP_Trigger.ino`](Arduino/ESP32_AP_Trigger.ino)
+> Firmware: [`Arduino/ESP32_AP_Trigger/ESP32_AP_Trigger.ino`](Arduino/ESP32_AP_Trigger/ESP32_AP_Trigger.ino)
+>
+> Web Bluetooth requires a Chromium-family browser such as Chrome or Edge on
+> localhost/HTTPS. Firefox and Safari do not currently support this control path.
+
+The AP trigger sketch serves WiFi and BLE at the same time. Use this single
+hybrid controller build, then choose Bluetooth or WiFi AP in the Mission
+Dashboard.
+
+## Arduino compile settings
+
+Install the **NimBLE-Arduino** library from the Arduino Library Manager before
+compiling. The sketch uses NimBLE instead of the default ESP32 BLE stack because
+it is much smaller and keeps the hybrid WiFi+BLE build practical.
+
+Recommended Arduino IDE board settings:
+
+| Setting | Value |
+|---------|-------|
+| Board | ESP32 Dev Module or your exact ESP32 board |
+| Partition Scheme | Default works; Huge APP (3MB No OTA) gives more headroom |
+| Core Debug Level | None |
+
+The current hybrid sketch compiles on the default ESP32 Dev Module partition
+with NimBLE-Arduino installed. If future features push it over the limit, change
+**Tools -> Partition Scheme** to a larger APP partition such as
+**Huge APP (3MB No OTA)**.
 
 ## Features
 

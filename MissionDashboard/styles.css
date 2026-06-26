@@ -30,6 +30,10 @@ header{position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-
 .wm .labs{background:linear-gradient(180deg,var(--ice),var(--blue));-webkit-background-clip:text;background-clip:text;color:transparent}
 .tag{font-size:.58em;letter-spacing:.3em;color:var(--muted);text-transform:uppercase;margin-top:4px}
 .hdr-right{display:flex;align-items:center;gap:20px;font-size:.78em}
+.top-nav{display:flex;align-items:center;gap:6px}
+.top-nav a{color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:8px;
+  padding:6px 10px;font-size:.82em;letter-spacing:.08em;text-transform:uppercase;transition:all .2s}
+.top-nav a:hover,.top-nav a.active{color:var(--ice);border-color:rgba(77,159,255,.45);background:rgba(77,159,255,.08)}
 .hdr-loc{color:var(--silver);letter-spacing:.03em;max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   filter:blur(6px);transition:filter .3s;cursor:default;user-select:none}
 .hdr-loc:hover{filter:blur(0)}
@@ -226,6 +230,63 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .derived-item .v{font-size:1.2em;font-weight:800;color:var(--silver);margin-top:6px}
 .derived-item .s{font-size:.72em;color:var(--muted);margin-top:5px;line-height:1.35}
 
+.launch-ble-card{margin-bottom:20px;border-color:rgba(77,159,255,.2)}
+.launch-link-state{font-size:.78em;color:var(--muted);letter-spacing:.04em}
+.launch-actions-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.launch-mode-switch{display:flex;gap:4px;align-items:center;background:rgba(7,11,22,.55);
+  border:1px solid var(--border);border-radius:8px;padding:4px}
+.launch-mode-btn{border:0;border-radius:6px;background:transparent;color:var(--muted);font-family:var(--font);
+  font-size:.66em;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:8px 10px;cursor:pointer}
+.launch-mode-btn.active{background:rgba(77,159,255,.18);color:var(--ice)}
+.launch-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+.launch-status-panel{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center}
+.launch-metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.launch-command-panel{background:rgba(7,11,22,.36);border:1px solid var(--border);border-radius:10px;padding:14px}
+.launch-wifi-row{margin-bottom:12px}
+.launch-checks{display:grid;gap:8px;margin:12px 0;color:var(--silver);font-size:.82em;line-height:1.4}
+.launch-checks label{display:flex;gap:8px;align-items:flex-start;background:rgba(255,255,255,.03);
+  border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 10px}
+.launch-checks input{margin-top:2px;accent-color:var(--green)}
+.launch-buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.launch-buttons .sp-save{margin-top:0}
+.launch-ble-card.linked{border-color:rgba(54,240,160,.35)}
+.launch-ble-card.armed{border-color:rgba(255,74,61,.45);box-shadow:0 0 32px rgba(255,74,61,.08)}
+
+.finder-page{max-width:1400px}
+.finder-layout{display:grid;grid-template-columns:360px 1fr;gap:16px;margin-bottom:16px}
+.finder-controls{align-self:start}
+.finder-actions{display:grid;grid-template-columns:1fr 1.2fr;gap:10px;margin:10px 0 0}
+.finder-note{font-size:.76em;color:var(--muted);line-height:1.5;background:rgba(255,179,71,.06);
+  border:1px solid rgba(255,179,71,.18);border-radius:8px;padding:10px 12px}
+.finder-map-wrap{position:relative;min-height:620px;border:1px solid var(--border);border-radius:14px;overflow:hidden;
+  background:rgba(7,11,22,.65);box-shadow:0 12px 36px rgba(0,0,0,.3)}
+#finder-map{position:absolute;inset:0;min-height:620px;background:#0b1224}
+.leaflet-container{font-family:var(--font);background:#0b1224}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#0c1224;color:var(--silver);border:1px solid var(--border)}
+.finder-legend{position:absolute;right:14px;bottom:14px;z-index:500;display:flex;gap:12px;flex-wrap:wrap;
+  background:rgba(7,11,22,.82);border:1px solid var(--border);border-radius:8px;padding:8px 10px;
+  color:var(--silver);font-size:.72em;backdrop-filter:blur(8px)}
+.finder-legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px}
+.lg-good{background:var(--green)}.lg-warn{background:var(--amber)}.lg-bad{background:var(--red)}
+.finder-results-card{margin-bottom:16px}
+.score-pill{display:inline-flex;align-items:center;justify-content:center;min-width:44px;border-radius:20px;
+  padding:3px 9px;font-weight:800;font-size:.76em}
+.score-pill.good{background:rgba(54,240,160,.14);color:var(--green);border:1px solid rgba(54,240,160,.3)}
+.score-pill.warn{background:rgba(255,179,71,.14);color:var(--amber);border:1px solid rgba(255,179,71,.3)}
+.score-pill.bad{background:rgba(255,74,61,.14);color:var(--red);border:1px solid rgba(255,74,61,.3)}
+
+.camera-page{max-width:1400px}
+.camera-layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
+.camera-stage{padding:0;overflow:hidden;position:relative;background:#030713;aspect-ratio:16/9}
+#cam-source{display:none}
+#cam-canvas{display:block;width:100%;height:100%;background:#030713}
+.camera-controls{align-self:start}
+.cam-buttons{display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:10px}
+.countdown-btn{width:100%;margin:6px 0 2px}
+.cam-note{margin-top:12px}
+.camera-stage::after{content:'REC';position:absolute;right:16px;top:14px;color:rgba(255,255,255,.35);
+  font-size:.68em;font-weight:800;letter-spacing:.2em;border:1px solid rgba(255,255,255,.16);border-radius:6px;padding:4px 8px}
+
 @media(max-width:540px){
   .hdr-right{gap:12px;width:100%;justify-content:flex-end}
   .hdr-loc{max-width:150px}
@@ -233,4 +294,11 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
   .ac-header{flex-direction:column;align-items:flex-start}
   .card-head{flex-direction:column}
   .card-head-note{text-align:left}
+}
+@media(max-width:900px){
+  .finder-layout{grid-template-columns:1fr}
+  .finder-map-wrap,#finder-map{min-height:520px}
+  .camera-layout{grid-template-columns:1fr}
+  .launch-grid,.launch-status-panel{grid-template-columns:1fr}
+  .launch-metrics{grid-template-columns:1fr}
 }
