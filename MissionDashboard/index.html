@@ -60,6 +60,20 @@
     <span id="net-detail">Waiting for live weather and airspace feeds.</span>
   </div>
 
+  <section class="mission-console">
+    <div class="mission-console-head">
+      <div>
+        <div class="lbl">Mission Control</div>
+        <h1>Launch Readiness</h1>
+        <p>BLE controller, weather, airspace, and recovery checks in one operations view.</p>
+      </div>
+      <div class="mission-strip">
+        <div><span>Link</span><b id="mission-link-label">BLE</b></div>
+        <div><span>Abort</span><b>Heartbeat</b></div>
+        <div><span>Security</span><b>Passcode</b></div>
+      </div>
+    </div>
+
   <section class="card launch-ble-card" id="launch-ble-card">
     <div class="card-head">
       <div>
@@ -111,6 +125,7 @@
         <div class="finder-note" id="ble-note">Connect the ESP32 over BLE. Arming always requires the checklist and code; active link loss during countdown forces a safe stop on the ESP32.</div>
       </div>
     </div>
+  </section>
   </section>
 
   <div class="rocket-badge" id="rocket-badge" role="button" tabindex="0" aria-label="Edit rocket profile">

@@ -64,7 +64,6 @@
         <button class="sp-save" id="cam-record" type="button" disabled>Start Recording</button>
         <button class="sp-secondary danger" id="cam-stop" type="button" disabled>Stop</button>
       </div>
-      <button class="sp-secondary countdown-btn" id="cam-countdown" type="button" disabled>Start 30s Countdown</button>
 
       <div class="sp-sec">Device Link</div>
       <div class="camera-link-card">
@@ -73,6 +72,33 @@
           <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
           <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
         </div>
+      </div>
+
+      <div class="sp-sec">Launch Countdown</div>
+      <div class="camera-launch-card">
+        <div class="sp-row">
+          <div class="sp-field">
+            <label for="ble-code">Arming code</label>
+            <input id="ble-code" type="password" inputmode="numeric" maxlength="6" placeholder="123456">
+          </div>
+          <div class="sp-field">
+            <label for="ble-count-seconds">Countdown s</label>
+            <input id="ble-count-seconds" type="number" min="5" max="60" value="30">
+          </div>
+        </div>
+        <div class="launch-checks compact">
+          <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
+          <label><input type="checkbox" class="ble-check"> Mission dashboard checked: aircraft, weather, location</label>
+          <label><input type="checkbox" class="ble-check"> Roads, buildings, dry vegetation, and power lines clear</label>
+          <label><input type="checkbox" class="ble-check"> Rocket secured, igniter connected, abort word understood</label>
+        </div>
+        <div class="launch-buttons">
+          <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
+          <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>
+          <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
+          <button class="sp-secondary danger" id="ble-abort" type="button" disabled>Abort</button>
+        </div>
+        <div class="finder-note cam-note" id="ble-note">Connect BLE, complete the checklist, arm with the passcode, then start the real device countdown.</div>
       </div>
 
       <div class="sp-sec">Overlay</div>
@@ -115,11 +141,13 @@
       <div class="sp-derived">
         <div class="sp-dr"><span class="sp-dk">Duration</span><span class="sp-dv" id="cam-duration">00:00</span></div>
         <div class="sp-dr"><span class="sp-dk">Countdown</span><span class="sp-dv" id="cam-count-state">Idle</span></div>
+        <div class="sp-dr"><span class="sp-dk">Armed</span><span class="sp-dv" id="ble-armed">No</span></div>
         <div class="sp-dr"><span class="sp-dk">BLE Link</span><span class="sp-dv" id="cam-ble-state">Offline</span></div>
+        <div class="sp-dr"><span class="sp-dk">Device Countdown</span><span class="sp-dv" id="ble-countdown">Idle</span></div>
         <div class="sp-dr"><span class="sp-dk">Audio</span><span class="sp-dv" id="cam-audio-state">Pending</span></div>
         <div class="sp-dr"><span class="sp-dk">Download</span><span class="sp-dv" id="cam-download">None</span></div>
       </div>
-      <div class="finder-note cam-note">The camera uses live dashboard countdown timing when available, or the local 30 second countdown button as a fallback.</div>
+      <div id="ble-countdown-sub" class="finder-note cam-note">Video overlay follows the actual launch countdown. TTS plays through the device speaker and is captured in the video when microphone audio is enabled.</div>
     </aside>
   </section>
 </main>

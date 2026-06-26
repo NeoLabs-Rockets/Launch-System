@@ -26,8 +26,10 @@ let bleConnected = false;
 let bleStatusData = null;
 let bleLastStatusAt = 0;
 let bleLastKnownName = localStorage.getItem('neolabs.ble.deviceName') || '';
+let restoringCountdown = false;
 
 window.addEventListener('DOMContentLoaded', () => {
+  restoreActiveLaunch();
   bindBleUi();
   publishPublicApi();
   renderLaunch();
@@ -127,6 +129,7 @@ async function connectBleDevice(device) {
   storeBleState();
   renderLaunch();
   await sendBle({ cmd: 'status' });
+  resumeRestoredCountdown();
 }
 
 function attachDisconnectListener(device) {
@@ -155,14 +158,10 @@ function onBleDisconnected() {
   bleStatus = null;
   stopLaunchHeartbeat();
   if (wasControllingCountdown) {
-    cancelLaunchSpeech();
-    stopLaunchCountdownUi('BLE disconnected');
-    broadcastLaunch({ type: 'abort', reason: 'BLE disconnected', mode: 'ble' });
-    clearLaunchCredential();
+    persistActiveLaunch();
+    setLaunchState('BLE disconnected - trying to hand off countdown', 'warn');
   }
-  setLaunchState(wasControllingCountdown
-    ? 'BLE disconnected - ESP32 heartbeat will fail safe'
-    : 'BLE disconnected. Reconnect before launch.', 'bad');
+  if (!wasControllingCountdown) setLaunchState('BLE disconnected. Reconnect before launch.', 'bad');
   storeBleState();
   renderLaunch();
 }
@@ -218,6 +217,7 @@ async function startLaunchCountdown() {
     launchCountdownActive = true;
     launchLastSpokenSecond = null;
     launchCodeMemory = code;
+    persistActiveLaunch();
     broadcastLaunch({ type: 'countdown_start', seconds, endsAt: launchCountdownEndsAt, mode: 'ble' });
     startLaunchHeartbeat();
     runLaunchCountdownTick();
@@ -254,7 +254,8 @@ async function runLaunchCountdownTick() {
 function startLaunchHeartbeat() {
   stopLaunchHeartbeat();
   launchHeartbeatTimer = setInterval(() => {
-    sendBle({ cmd: 'heartbeat' }).catch(() => onBleDisconnected());
+    const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
+    sendBle({ cmd: 'heartbeat', left }).catch(() => onBleDisconnected());
   }, 700);
 }
 
@@ -270,6 +271,7 @@ async function abortLaunchCountdown() {
   stopLaunchCountdownUi('Aborted');
   broadcastLaunch({ type: 'abort', reason: 'Manual abort', mode: 'ble' });
   clearLaunchCredential();
+  clearPersistedLaunch();
   if (bleConnected && bleCommand) {
     try { await sendBle({ cmd: 'abort' }); } catch (_) {}
   }
@@ -313,6 +315,7 @@ function applyBleStatus(s) {
   if (!bleStatusData.countdown && launchCountdownActive) {
     stopLaunchCountdownUi('Device stopped countdown');
     broadcastLaunch({ type: 'abort', reason: 'Device stopped countdown', mode: 'ble' });
+    clearPersistedLaunch();
   }
   if (bleStatusData.error) setLaunchState(`BLE: ${bleStatusData.error}`, 'warn');
   storeBleState();
@@ -424,6 +427,54 @@ function clearLaunchCredential() {
   clearVisibleCode();
 }
 
+function persistActiveLaunch() {
+  if (!launchCountdownActive || !launchCountdownEndsAt) return;
+  const payload = {
+    endsAt: launchCountdownEndsAt,
+    code: launchCodeMemory || getVisibleCode(),
+    at: Date.now()
+  };
+  try { sessionStorage.setItem('neolabs.launch.active', JSON.stringify(payload)); } catch (_) {}
+}
+
+function restoreActiveLaunch() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('neolabs.launch.active') || 'null');
+    if (!saved || !saved.endsAt || saved.endsAt <= Date.now()) {
+      clearPersistedLaunch();
+      return;
+    }
+    launchCountdownEndsAt = saved.endsAt;
+    launchCodeMemory = saved.code || '';
+    launchCountdownActive = true;
+    restoringCountdown = true;
+    broadcastLaunch({
+      type: 'countdown_tick',
+      left: Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000)),
+      endsAt: launchCountdownEndsAt,
+      mode: 'ble'
+    });
+  } catch (_) {
+    clearPersistedLaunch();
+  }
+}
+
+function resumeRestoredCountdown() {
+  if (!launchCountdownActive || !launchCountdownEndsAt) return;
+  restoringCountdown = false;
+  startLaunchHeartbeat();
+  const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
+  sendBle({ cmd: 'heartbeat', left }).catch(() => onBleDisconnected());
+  clearInterval(launchCountdownTimer);
+  launchCountdownTimer = setInterval(runLaunchCountdownTick, 150);
+  runLaunchCountdownTick();
+  setLaunchState('Countdown restored after page switch', 'warn');
+}
+
+function clearPersistedLaunch() {
+  try { sessionStorage.removeItem('neolabs.launch.active'); } catch (_) {}
+}
+
 function primeLaunchSpeech() {
   if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) return false;
   try {
@@ -494,6 +545,8 @@ function broadcastLaunch(payload) {
   const message = { ...payload, source: 'launch-dashboard', at: Date.now() };
   try { LAUNCH_CHANNEL?.postMessage(message); } catch (_) {}
   try { localStorage.setItem('neolabs.launch.lastEvent', JSON.stringify(message)); } catch (_) {}
+  if (payload.type === 'countdown_tick' || payload.type === 'countdown_start') persistActiveLaunch();
+  if (payload.type === 'abort' || payload.type === 'ignition') clearPersistedLaunch();
 }
 
 function storeBleState(extra = {}) {

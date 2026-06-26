@@ -6,9 +6,6 @@ let chunks = [];
 let drawFrameId = null;
 let recordStartedAt = 0;
 let durationTimer = null;
-let countdownTimer = null;
-let countdownEndsAt = 0;
-let countdownActive = false;
 let externalCountdownEndsAt = 0;
 let externalCountdownBaseEndsAt = 0;
 let externalCountdownActive = false;
@@ -33,7 +30,6 @@ function bindControls() {
   document.getElementById('cam-start-preview').addEventListener('click', openCamera);
   document.getElementById('cam-record').addEventListener('click', startRecording);
   document.getElementById('cam-stop').addEventListener('click', stopRecording);
-  document.getElementById('cam-countdown').addEventListener('click', startCountdown);
   document.getElementById('cam-sync-offset').addEventListener('input', event => {
     syncOffsetMs = clamp(Number(event.target.value), -5000, 5000);
     updateExternalCountdownLabel();
@@ -123,13 +119,6 @@ function startClock() {
 function refreshCountdownState() {
   if (externalCountdownActive) {
     updateExternalCountdownLabel();
-    return;
-  }
-  if (countdownActive) {
-    const leftMs = countdownEndsAt - Date.now();
-    document.getElementById('cam-count-state').textContent = leftMs > 0
-      ? `Local T-${formatCountdown(leftMs)}`
-      : 'Ignition';
   }
 }
 
@@ -184,7 +173,6 @@ async function openCamera() {
     resizeCanvas();
     startDrawLoop();
     document.getElementById('cam-record').disabled = false;
-    document.getElementById('cam-countdown').disabled = false;
     setStatus('Camera ready', 'Preview includes the recorded overlay.', 'ok');
   } catch (err) {
     setStatus('Camera unavailable', 'Allow camera permission or try another browser/device.', 'bad');
@@ -239,10 +227,8 @@ function drawOverlay(ctx, w, h) {
   if (externalCountdownActive && externalCountdownBaseEndsAt) {
     externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
   }
-  const ownCountdownMs = countdownActive ? countdownEndsAt - Date.now() : null;
   const liveCountdownMs = externalCountdownActive ? externalCountdownEndsAt - Date.now() : null;
-  const countdownMs = liveCountdownMs ?? ownCountdownMs;
-  const countdownLive = liveCountdownMs != null;
+  const countdownMs = liveCountdownMs;
 
   const padPx = Math.round(w * 0.025);
   const topH = Math.round(h * 0.15);
@@ -286,8 +272,8 @@ function drawOverlay(ctx, w, h) {
     ctx.fillText(txt, w / 2, h * 0.52);
     ctx.shadowBlur = 0;
     ctx.font = `700 ${Math.round(w * 0.017)}px Segoe UI, Arial`;
-    ctx.fillStyle = countdownLive ? '#36f0a0' : '#ffb347';
-    ctx.fillText(countdownLive ? 'LIVE CONTROLLER COUNTDOWN' : 'LOCAL CAMERA COUNTDOWN', w / 2, h * 0.58);
+    ctx.fillStyle = '#36f0a0';
+    ctx.fillText('LIVE DEVICE COUNTDOWN', w / 2, h * 0.58);
   }
 
   const arcCX = w / 2;
@@ -354,7 +340,6 @@ async function startRecording() {
   recordStartedAt = Date.now();
   document.getElementById('cam-record').disabled = true;
   document.getElementById('cam-stop').disabled = false;
-  document.getElementById('cam-countdown').disabled = false;
   document.getElementById('cam-download').textContent = 'Recording';
   durationTimer = setInterval(updateDuration, 250);
   setStatus('Recording', audioStream ? 'Video overlay and microphone audio are being recorded.' : 'Video overlay recording. Mic audio unavailable/off.', 'bad');
@@ -372,36 +357,10 @@ function preferredMimeType() {
 function stopRecording() {
   if (recorder?.state === 'recording') recorder.stop();
   clearInterval(durationTimer);
-  clearInterval(countdownTimer);
-  countdownActive = false;
   document.getElementById('cam-count-state').textContent = 'Idle';
   document.getElementById('cam-record').disabled = false;
   document.getElementById('cam-stop').disabled = true;
   setStatus('Processing download', 'Preparing the recorded WebM file.', 'warn');
-}
-
-function startCountdown() {
-  countdownEndsAt = Date.now() + 30000;
-  countdownActive = true;
-  updateCountdown();
-  clearInterval(countdownTimer);
-  countdownTimer = setInterval(updateCountdown, 150);
-  beep(880, 0.12);
-}
-
-function updateCountdown() {
-  const leftMs = countdownEndsAt - Date.now();
-  document.getElementById('cam-count-state').textContent = leftMs > 0 ? `Local T-${formatCountdown(leftMs)}` : 'Ignition';
-  if (leftMs <= 0) {
-    clearInterval(countdownTimer);
-    countdownActive = false;
-    beep(440, 0.45);
-    setTimeout(() => {
-      if (document.getElementById('cam-count-state').textContent === 'Ignition') {
-        document.getElementById('cam-count-state').textContent = 'Idle';
-      }
-    }, 3000);
-  }
 }
 
 function updateDuration() {
@@ -445,21 +404,6 @@ function setStatus(title, detail, state) {
   document.getElementById('cam-detail').textContent = detail;
 }
 
-function beep(freq, duration) {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.frequency.value = freq;
-    gain.gain.value = 0.04;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
-    osc.stop(ctx.currentTime + duration);
-  } catch (_) {}
-}
-
 function stopStreams() {
   cancelAnimationFrame(drawFrameId);
   [sourceStream, audioStream, mixedStream].forEach(stream => {
@@ -470,5 +414,4 @@ function stopStreams() {
   mixedStream = null;
   document.getElementById('cam-record').disabled = true;
   document.getElementById('cam-stop').disabled = true;
-  document.getElementById('cam-countdown').disabled = true;
 }
