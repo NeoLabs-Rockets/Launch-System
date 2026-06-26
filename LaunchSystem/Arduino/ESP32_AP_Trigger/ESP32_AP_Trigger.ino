@@ -47,7 +47,20 @@
 #define TRIGGER_MS   2000UL   // relay pulse duration in milliseconds
 #define DEBOUNCE_MS   50UL   // physical button debounce
 #define BUZZ_MS      120UL   // default vibration pulse (per countdown step)
-#define BUZZ_MAX    1500UL   // hard cap on any single vibration pulse
+#define BUZZ_MAX    5000UL   // hard cap on any single vibration pulse
+#define COUNTDOWN_CLIENT_TIMEOUT_MS 3000UL // abort if the launch page stops heartbeating
+
+// Haptic feedback
+#define ARM_BUZZ_MS                 450UL
+#define DISARM_BUZZ_MS              900UL
+#define WRONG_CODE_BUZZ_MS          180UL
+#define LOCKOUT_BUZZ_MS            3000UL
+#define COUNTDOWN_START_BUZZ_MS     700UL
+#define ABORT_BUZZ_MS              3000UL
+#define LINK_LOST_BUZZ_MS          2500UL
+#define TRIGGER_BUZZ_MS            1200UL
+#define ARMED_IDLE_BUZZ_MS           90UL
+#define ARMED_IDLE_BUZZ_INTERVAL_MS 5000UL
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <WiFi.h>
@@ -69,9 +82,15 @@ bool          lockedOut     = false;    // true after MAX_ATTEMPTS, until reboot
 
 bool          motorActive   = false;    // vibration motor currently on
 unsigned long motorOff      = 0;        // millis() at which to switch it off
+unsigned long lastArmedBuzz = 0;        // last idle armed reminder buzz
+
+void buzz(unsigned long ms);
 
 int           lastBtnRead   = HIGH;
 unsigned long lastDebounce  = 0;
+
+bool          countdownActive = false;  // true while a browser-owned countdown is live
+unsigned long countdownLastBeat = 0;    // last browser heartbeat during countdown
 
 // ─── Embedded web UI ─────────────────────────────────────────────────────────
 static const char HTML_PAGE[] = R"HTMLPAGE(<!DOCTYPE html>
@@ -134,6 +153,10 @@ main{max-width:840px;margin:0 auto;padding:30px 18px;position:relative;z-index:1
   padding:10px 14px;font-size:.7em;letter-spacing:.28em;color:var(--red);text-align:center;
   background:rgba(255,74,61,.06);animation:warn-pulse 1.3s infinite}
 .armed-warn.show{display:block}
+.conn-warn{display:none;margin-bottom:16px;border:1px solid rgba(255,179,71,.55);border-radius:10px;
+  padding:10px 14px;font-size:.7em;letter-spacing:.18em;color:var(--amber);text-align:center;
+  background:rgba(255,179,71,.08)}
+.conn-warn.show{display:block}
 @keyframes warn-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 
 .status-badge{display:flex;align-items:center;gap:12px;font-size:.98em;margin-bottom:18px;font-weight:500}
@@ -282,6 +305,7 @@ footer{text-align:center;color:var(--muted);font-size:.62em;letter-spacing:.2em;
 <main>
   <div class="lbl">System Status</div>
   <div class="card">
+    <div class="conn-warn" id="conn-warn">LIVE LINK LOST - RECONNECT TO 192.168.4.1</div>
     <div class="armed-warn" id="armed-warn">&#9888;&nbsp;SYSTEM ARMED &mdash; TRIGGER ENABLED</div>
     <div class="status-badge"><div class="ind" id="ind"></div><div id="stxt">Connecting&hellip;</div></div>
     <div class="stats">
@@ -331,6 +355,14 @@ footer{text-align:center;color:var(--muted);font-size:.62em;letter-spacing:.2em;
       <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
         <div>Weather and surroundings are safe for launch; no fire hazard nearby.</div></div>
       <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Checked mission control dashboard, including planes, weather, and recovery area.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Pad is aimed away from people, buildings, roads, dry vegetation, and power lines.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Fire suppression, first-aid plan, and recovery route are ready.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
+        <div>Abort word and countdown procedure are understood by everyone nearby.</div></div>
+      <div class="check" onclick="toggleCheck(this)"><div class="box"></div>
         <div>I am <b>authorized to launch</b> and ready to abort if anything goes wrong.</div></div>
 
       <div class="modal-btns">
@@ -379,10 +411,21 @@ const CIRCUM=2*Math.PI*88;
 const arc=document.getElementById('arc');
 arc.setAttribute('stroke-dasharray',CIRCUM);
 arc.setAttribute('stroke-dashoffset',0);
-let cdTimer=null,aborted=false;
+let cdTimer=null,heartbeatTimer=null,aborted=false,liveLink=false,speechReady=false,audioCtx=null;
+
+function fetchWithTimeout(url,opts={},timeout=1800){
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),timeout);
+  return fetch(url,{...opts,signal:ctrl.signal}).finally(()=>clearTimeout(t));
+}
 
 async function fetchStatus(){
-  try{const r=await fetch('/api/status');if(r.ok)applyStatus(await r.json());}catch(_){}
+  try{
+    const r=await fetchWithTimeout('/api/status');
+    if(r.ok){setLiveLink(true);applyStatus(await r.json());return;}
+  }catch(_){}
+  setLiveLink(false);
+  if(document.getElementById('overlay').classList.contains('show'))abortSeq('Live link lost - countdown stopped',true);
 }
 
 function applyStatus(d){
@@ -425,6 +468,16 @@ function applyStatus(d){
 
 function setInd(el,c,s){el.style.background=c;el.style.boxShadow=s;}
 function pad(n){return String(n).padStart(2,'0');}
+function setLiveLink(ok){
+  liveLink=ok;
+  document.getElementById('conn-warn').className='conn-warn'+(ok?'':' show');
+  if(!ok){
+    const ind=document.getElementById('ind'),stxt=document.getElementById('stxt');
+    setInd(ind,'var(--amber)','0 0 10px var(--amber)');
+    stxt.textContent='LIVE LINK LOST - Arduino not responding';
+    document.getElementById('b-trig').disabled=true;
+  }
+}
 
 // ARM button → checklist+code modal; DISARM → immediate (no code, safety)
 function toggleArm(){
@@ -511,9 +564,49 @@ async function confirmArm(){
   }catch(_){err.textContent='✖ CONNECTION ERROR';refreshConfirm();}
 }
 
-function startSequence(){
+function primeSpeech(){
+  if(!('speechSynthesis' in window)||!('SpeechSynthesisUtterance' in window))return false;
+  try{speechSynthesis.cancel();speechSynthesis.getVoices();speechReady=true;return true;}catch(_){return false;}
+}
+if('speechSynthesis' in window)speechSynthesis.onvoiceschanged=()=>{speechReady=true;};
+
+function beep(freq=880,dur=.12){
+  try{
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+    o.frequency.value=freq;o.type='sine';g.gain.value=.035;
+    o.connect(g);g.connect(audioCtx.destination);o.start();
+    g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);
+    o.stop(audioCtx.currentTime+dur);
+  }catch(_){}
+}
+
+function speakStep(n){
+  if(primeSpeech()){
+    try{
+      const u=new SpeechSynthesisUtterance(n===0?'Ignition':String(n));
+      const voices=speechSynthesis.getVoices();
+      const en=voices.find(v=>/^en[-_]/i.test(v.lang))||voices[0];
+      if(en)u.voice=en;
+      u.lang=(en&&en.lang)||'en-US';u.rate=1.0;u.pitch=n<=3?1.25:1.0;u.volume=1;
+      speechSynthesis.cancel();speechSynthesis.speak(u);return;
+    }catch(_){}
+  }
+  beep(n===0?440:880,n===0?.35:.1);
+}
+
+function cancelSpeech(){try{if('speechSynthesis' in window)speechSynthesis.cancel();}catch(_){}}
+
+async function startSequence(){
   if(document.getElementById('b-trig').disabled)return;
+  primeSpeech();
   aborted=false;
+  try{
+    const r=await fetchWithTimeout('/api/countdown/start',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok||!d.ok){showToast('Countdown rejected: '+(d.error||'unknown'),true);fetchStatus();return;}
+  }catch(_){setLiveLink(false);showToast('Cannot start countdown - live link lost',true);return;}
+  startHeartbeat();
   arc.style.transition='none';
   arc.setAttribute('stroke-dashoffset',0);
   void arc.getBoundingClientRect();
@@ -522,6 +615,21 @@ function startSequence(){
   document.getElementById('overlay').classList.add('show');
   runCd(10);
 }
+
+function startHeartbeat(){
+  stopHeartbeat();
+  heartbeatTimer=setInterval(async()=>{
+    try{
+      const r=await fetchWithTimeout('/api/countdown/heartbeat',{method:'POST'},1400);
+      if(!r.ok)throw new Error('heartbeat rejected');
+      setLiveLink(true);
+    }catch(_){
+      setLiveLink(false);
+      abortSeq('Live link lost - countdown stopped',true);
+    }
+  },900);
+}
+function stopHeartbeat(){if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}}
 
 function runCd(n){
   if(aborted)return;
@@ -532,9 +640,7 @@ function runCd(n){
   numEl.style.animation=n===0?'ignite .5s ease':'';
   subEl.textContent=n>0?'T-MINUS '+n+' SECOND'+(n===1?'':'S'):'▼  IGNITION  ▼';
 
-  const u=new SpeechSynthesisUtterance(n===0?'Ignition':String(n));
-  u.lang='en-US';u.rate=1.05;u.pitch=n<=3?1.4:1.0;
-  speechSynthesis.speak(u);
+  speakStep(n);
 
   // Short haptic buzz each step; a longer one at ignition
   buzz(n===0?450:120);
@@ -546,11 +652,12 @@ function runCd(n){
 // Fire-and-forget vibration request to the ESP32
 function buzz(ms){fetch('/api/buzz?ms='+ms,{method:'POST'}).catch(()=>{});}
 
-function abortSeq(){
-  aborted=true;clearTimeout(cdTimer);speechSynthesis.cancel();
+async function abortSeq(msg='Launch sequence aborted',err=false){
+  aborted=true;clearTimeout(cdTimer);stopHeartbeat();cancelSpeech();
   arc.style.transition='none';arc.setAttribute('stroke-dashoffset',0);
   document.getElementById('overlay').classList.remove('show');
-  showToast('Launch sequence aborted');
+  fetch('/api/countdown/abort',{method:'POST'}).catch(()=>{});
+  showToast(msg,err);
 }
 
 async function fireTrigger(){
@@ -560,13 +667,15 @@ async function fireTrigger(){
   setTimeout(()=>{fl.style.opacity='0';setTimeout(()=>fl.remove(),450);},60);
 
   try{
-    const r=await fetch('/api/trigger',{method:'POST'});
+    const r=await fetchWithTimeout('/api/trigger',{method:'POST'},2200);
     const d=await r.json();
+    stopHeartbeat();
     document.getElementById('overlay').classList.remove('show');
-    speechSynthesis.cancel();
+    cancelSpeech();
     d.ok?showToast('Trigger fired — 800 ms pulse sent'):showToast('Rejected: '+(d.error||'unknown'),true);
     await fetchStatus();
   }catch(_){
+    stopHeartbeat();setLiveLink(false);
     document.getElementById('overlay').classList.remove('show');
     showToast('Connection error during trigger',true);
   }
@@ -589,6 +698,33 @@ setInterval(fetchStatus,2500);
 </html>
 )HTMLPAGE";
 
+static const char CAPTIVE_PAGE[] = R"CAPTIVEPAGE(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeoLabs Rockets</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#070b16;color:#dbe7ff;font-family:system-ui,-apple-system,Segoe UI,sans-serif;text-align:center;padding:24px}
+main{max-width:360px}
+h1{font-size:1.15rem;letter-spacing:.14em;text-transform:uppercase;color:#9fd4ff}
+p{line-height:1.45;color:#c9d6ef}
+.ip{font-size:1.7rem;font-weight:800;color:#36f0a0;margin:14px 0}
+small{color:#5b6a8f}
+</style>
+</head>
+<body>
+<main>
+  <h1>NeoLabs Rockets</h1>
+  <p>This WiFi popup cannot run Mission Control reliably.</p>
+  <p>Open this address in Chrome, Safari, Edge, or Firefox:</p>
+  <div class="ip">192.168.4.1</div>
+  <small>This popup should close automatically after the device marks the WiFi connection as successful.</small>
+  <script>setTimeout(()=>{try{window.close();}catch(e){}},4500);</script>
+</main>
+</body>
+</html>)CAPTIVEPAGE";
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 void setCORSHeaders() {
   server.sendHeader("Access-Control-Allow-Origin",  "*");
@@ -609,19 +745,35 @@ void handleRoot() {
 
 void handleCaptivePortal() {
   setCORSHeaders();
-  server.send(200, "text/html", HTML_PAGE);
+  server.send(200, "text/html", CAPTIVE_PAGE);
+}
+
+void handleAndroidProbe() {
+  setCORSHeaders();
+  server.send(204, "text/plain", "");
+}
+
+void handleAppleProbe() {
+  setCORSHeaders();
+  server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+}
+
+void handleWindowsProbe() {
+  setCORSHeaders();
+  server.send(200, "text/plain", "Microsoft Connect Test");
 }
 
 void handleStatus() {
-  char buf[160];
+  char buf[220];
   snprintf(buf, sizeof(buf),
-    "{\"armed\":%s,\"trigger_active\":%s,\"uptime_ms\":%lu,\"clients\":%d,\"locked\":%s,\"attempts_left\":%d}",
+    "{\"armed\":%s,\"trigger_active\":%s,\"uptime_ms\":%lu,\"clients\":%d,\"locked\":%s,\"attempts_left\":%d,\"countdown_active\":%s}",
     armed         ? "true" : "false",
     triggerActive ? "true" : "false",
     millis(),
     (int)WiFi.softAPgetStationNum(),
     lockedOut ? "true" : "false",
-    lockedOut ? 0 : (MAX_ATTEMPTS - armAttempts)
+    lockedOut ? 0 : (MAX_ATTEMPTS - armAttempts),
+    countdownActive ? "true" : "false"
   );
   sendJSON(200, buf);
 }
@@ -635,10 +787,12 @@ void handleArm() {
     armAttempts++;
     if (armAttempts >= MAX_ATTEMPTS) {
       lockedOut = true;
+      buzz(LOCKOUT_BUZZ_MS);
       Serial.println("[SECURITY] Locked out after too many wrong codes");
       sendJSON(423, "{\"ok\":false,\"error\":\"locked out\"}");
       return;
     }
+    buzz(WRONG_CODE_BUZZ_MS);
     char buf[80];
     snprintf(buf, sizeof(buf),
       "{\"ok\":false,\"error\":\"invalid code\",\"attempts_left\":%d}",
@@ -649,17 +803,62 @@ void handleArm() {
 
   armAttempts = 0;   // reset counter on success
   armed = true;
+  countdownActive = false;
+  lastArmedBuzz = millis();
+  buzz(ARM_BUZZ_MS);
   sendJSON(200, "{\"ok\":true,\"armed\":true}");
 }
-void handleDisarm() { armed = false; sendJSON(200, "{\"ok\":true,\"armed\":false}"); }
+void handleDisarm() {
+  armed = false;
+  countdownActive = false;
+  buzz(DISARM_BUZZ_MS);
+  sendJSON(200, "{\"ok\":true,\"armed\":false}");
+}
+
+bool countdownFresh() {
+  return countdownActive && (millis() - countdownLastBeat <= COUNTDOWN_CLIENT_TIMEOUT_MS);
+}
+
+void handleCountdownStart() {
+  if (!armed)        { sendJSON(403, "{\"ok\":false,\"error\":\"not armed\"}"); return; }
+  if (triggerActive) { sendJSON(409, "{\"ok\":false,\"error\":\"trigger already active\"}"); return; }
+  countdownActive = true;
+  countdownLastBeat = millis();
+  buzz(COUNTDOWN_START_BUZZ_MS);
+  sendJSON(200, "{\"ok\":true}");
+}
+
+void handleCountdownHeartbeat() {
+  if (!armed || triggerActive || !countdownActive) {
+    sendJSON(409, "{\"ok\":false,\"error\":\"countdown inactive\"}");
+    return;
+  }
+  countdownLastBeat = millis();
+  sendJSON(200, "{\"ok\":true}");
+}
+
+void handleCountdownAbort() {
+  countdownActive = false;
+  buzz(ABORT_BUZZ_MS);
+  sendJSON(200, "{\"ok\":true}");
+}
 
 void handleTrigger() {
   if (!armed)        { sendJSON(403, "{\"ok\":false,\"error\":\"not armed\"}");         return; }
   if (triggerActive) { sendJSON(409, "{\"ok\":false,\"error\":\"trigger already active\"}"); return; }
+  if (!countdownFresh()) {
+    countdownActive = false;
+    armed = false;
+    buzz(LINK_LOST_BUZZ_MS);
+    sendJSON(409, "{\"ok\":false,\"error\":\"live countdown link lost\"}");
+    return;
+  }
   digitalWrite(TRIGGER_PIN, HIGH);
+  buzz(TRIGGER_BUZZ_MS);
   triggerActive = true;
   triggerStart  = millis();
   armed         = false;
+  countdownActive = false;
   Serial.println("[TRIGGER] Pulse started");
   sendJSON(200, "{\"ok\":true}");
 }
@@ -669,6 +868,7 @@ void buzz(unsigned long ms) {
   if (MOTOR_PIN < 0) return;
   if (ms > BUZZ_MAX) ms = BUZZ_MAX;
   if (ms < 1)        ms = 1;
+  if (armed && !countdownActive && !triggerActive) lastArmedBuzz = millis();
   digitalWrite(MOTOR_PIN, HIGH);
   motorActive = true;
   motorOff    = millis() + ms;
@@ -684,8 +884,8 @@ void handleNotFound() {
   if (server.method() == HTTP_OPTIONS) { setCORSHeaders(); server.send(204); return; }
 
   // Captive portal fallback:
-  // Anything that is not an API request gets the UI, so phones/laptops that
-  // probe URLs like /generate_204, /hotspot-detect.html, etc. open the portal.
+  // Anything that is not an API request gets a lightweight instruction page.
+  // The full Mission Control UI is only served from http://192.168.4.1/.
   if (!server.uri().startsWith("/api/")) {
     handleCaptivePortal();
     return;
@@ -703,7 +903,17 @@ void checkArmButton() {
     static int stable = HIGH;
     if (reading != stable) {
       stable = reading;
-      if (stable == LOW) { armed = !armed; Serial.printf("[ARM_BTN] %s\n", armed ? "ARMED" : "DISARMED"); }
+      if (stable == LOW) {
+        armed = !armed;
+        if (armed) {
+          lastArmedBuzz = millis();
+          buzz(ARM_BUZZ_MS);
+        } else {
+          countdownActive = false;
+          buzz(DISARM_BUZZ_MS);
+        }
+        Serial.printf("[ARM_BTN] %s\n", armed ? "ARMED" : "DISARMED");
+      }
     }
   }
   lastBtnRead = reading;
@@ -735,23 +945,27 @@ void setup() {
 
   server.on("/",                         HTTP_GET,  handleRoot);
 
-  // Common captive-portal probe URLs used by Android, iOS/macOS, and Windows.
-  server.on("/generate_204",             HTTP_GET,  handleCaptivePortal);
-  server.on("/gen_204",                  HTTP_GET,  handleCaptivePortal);
-  server.on("/hotspot-detect.html",      HTTP_GET,  handleCaptivePortal);
-  server.on("/library/test/success.html",HTTP_GET,  handleCaptivePortal);
-  server.on("/ncsi.txt",                 HTTP_GET,  handleCaptivePortal);
-  server.on("/connecttest.txt",          HTTP_GET,  handleCaptivePortal);
+  // Common captive-network checks. Return the expected success response so the
+  // OS popup closes; real control UI stays at http://192.168.4.1/.
+  server.on("/generate_204",             HTTP_GET,  handleAndroidProbe);
+  server.on("/gen_204",                  HTTP_GET,  handleAndroidProbe);
+  server.on("/hotspot-detect.html",      HTTP_GET,  handleAppleProbe);
+  server.on("/library/test/success.html",HTTP_GET,  handleAppleProbe);
+  server.on("/ncsi.txt",                 HTTP_GET,  handleWindowsProbe);
+  server.on("/connecttest.txt",          HTTP_GET,  handleWindowsProbe);
   server.on("/redirect",                 HTTP_GET,  handleCaptivePortal);
 
   server.on("/api/status",               HTTP_GET,  handleStatus);
   server.on("/api/arm",                  HTTP_POST, handleArm);
   server.on("/api/disarm",               HTTP_POST, handleDisarm);
+  server.on("/api/countdown/start",      HTTP_POST, handleCountdownStart);
+  server.on("/api/countdown/heartbeat",  HTTP_POST, handleCountdownHeartbeat);
+  server.on("/api/countdown/abort",      HTTP_POST, handleCountdownAbort);
   server.on("/api/trigger",              HTTP_POST, handleTrigger);
   server.on("/api/buzz",                 HTTP_POST, handleBuzz);
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[OK] Web server started — connect to the AP and the captive portal should open");
+  Serial.println("[OK] Web server started - open http://192.168.4.1/ in a browser");
 }
 
 // ─── Loop ────────────────────────────────────────────────────────────────────
@@ -764,6 +978,19 @@ void loop() {
     digitalWrite(TRIGGER_PIN, LOW);
     triggerActive = false;
     Serial.println("[TRIGGER] Pulse complete");
+  }
+
+  if (countdownActive && (millis() - countdownLastBeat > COUNTDOWN_CLIENT_TIMEOUT_MS)) {
+    countdownActive = false;
+    armed = false;
+    buzz(LINK_LOST_BUZZ_MS);
+    Serial.println("[COUNTDOWN] Heartbeat lost, countdown aborted and system disarmed");
+  }
+
+  if (armed && !countdownActive && !triggerActive && !motorActive &&
+      (millis() - lastArmedBuzz >= ARMED_IDLE_BUZZ_INTERVAL_MS)) {
+    buzz(ARMED_IDLE_BUZZ_MS);
+    lastArmedBuzz = millis();
   }
 
   // End the vibration pulse once its duration has elapsed (non-blocking)
