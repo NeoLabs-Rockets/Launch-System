@@ -714,6 +714,91 @@ setInterval(fetchStatus,2500);
 </html>
 )HTMLPAGE";
 
+static const char HTML_PAGE_SAFE[] = R"HTMLSAFE(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeoLabs Launch Controller</title>
+<style>
+:root{--bg:#070b16;--panel:#10182c;--panel2:#0b1121;--border:#20304f;--text:#dbe7ff;--muted:#8090b4;--blue:#4d9fff;--green:#36f0a0;--amber:#ffb347;--red:#ff4a3d}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif}
+header{padding:18px 16px;border-bottom:1px solid var(--border);background:#080d19;position:sticky;top:0;z-index:2}
+.wrap{max-width:820px;margin:auto}.brand{font-weight:800;letter-spacing:.16em;text-transform:uppercase}.sub{color:var(--muted);font-size:.86rem;margin-top:4px}
+main{padding:18px 16px 36px}.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;margin:0 0 14px;box-shadow:0 12px 32px rgba(0,0,0,.25)}
+.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.state{font-size:1.35rem;font-weight:900;letter-spacing:.08em}.pill{border:1px solid var(--border);border-radius:999px;padding:5px 10px;color:var(--muted);font-size:.78rem}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}@media(max-width:640px){.grid{grid-template-columns:repeat(2,1fr)}}
+.metric{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:10px}.k{font-size:.68rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}.v{font-weight:800;margin-top:4px}
+label{display:block;color:var(--muted);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}
+input{width:100%;border:1px solid var(--border);border-radius:8px;background:#070b16;color:var(--text);font:inherit;padding:11px;outline:none}input:focus{border-color:var(--blue)}
+.row{display:grid;grid-template-columns:1fr 140px;gap:10px}@media(max-width:560px){.row{grid-template-columns:1fr}}
+.checks{display:grid;gap:8px;margin:12px 0}.checks label{display:flex;gap:9px;align-items:flex-start;background:#0b1121;border:1px solid var(--border);border-radius:8px;padding:10px;text-transform:none;letter-spacing:0;color:var(--text);font-size:.9rem;line-height:1.35;margin:0}.checks input{width:auto;margin-top:2px;accent-color:var(--green)}
+.buttons{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px}@media(max-width:760px){.buttons{grid-template-columns:1fr 1fr}}button{border:1px solid var(--border);border-radius:8px;background:#0b1121;color:var(--text);font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:12px 10px;cursor:pointer}button:disabled{opacity:.42;cursor:not-allowed}.ok{border-color:rgba(54,240,160,.55);color:var(--green)}.warn{border-color:rgba(255,179,71,.6);color:var(--amber)}.bad{border-color:rgba(255,74,61,.55);color:var(--red)}.primary{background:linear-gradient(135deg,#255dcc,#4d9fff);border:0;color:#fff}.danger{background:rgba(255,74,61,.12);border-color:rgba(255,74,61,.45);color:#ffb3aa}
+#count{display:none;position:fixed;inset:0;background:rgba(3,7,19,.94);z-index:5;place-items:center;text-align:center;padding:20px}.big{font-size:clamp(5rem,18vw,12rem);font-weight:1000;line-height:.9}.countsub{color:var(--amber);letter-spacing:.16em;text-transform:uppercase;margin:16px 0 28px}.toast{position:fixed;left:16px;right:16px;bottom:16px;max-width:640px;margin:auto;background:#080d19;border:1px solid var(--border);border-radius:10px;padding:12px;display:none;color:var(--text);z-index:8}.show{display:block}.muted{color:var(--muted)}.linklost{border-color:rgba(255,179,71,.65)}
+</style>
+</head>
+<body>
+<header><div class="wrap"><div class="brand">NeoLabs Rockets</div><div class="sub">ESP32 local launch controller - open 192.168.4.1 in a normal browser, not the WiFi popup.</div></div></header>
+<main class="wrap">
+  <section class="card" id="status-card">
+    <div class="top"><div><div class="k">Controller status</div><div class="state" id="state">CONNECTING</div></div><div class="pill" id="link">live link starting</div></div>
+    <div class="grid">
+      <div class="metric"><div class="k">Armed</div><div class="v" id="armed">-</div></div>
+      <div class="metric"><div class="k">Countdown</div><div class="v" id="cdstat">-</div></div>
+      <div class="metric"><div class="k">Clients</div><div class="v" id="clients">-</div></div>
+      <div class="metric"><div class="k">Attempts</div><div class="v" id="attempts">-</div></div>
+    </div>
+  </section>
+  <section class="card">
+    <div class="row">
+      <div><label for="code">Arming code</label><input id="code" inputmode="numeric" maxlength="6" type="password" autocomplete="off"></div>
+      <div><label for="secs">Countdown seconds</label><input id="secs" type="number" min="5" max="60" value="10"></div>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" class="chk"> Area clear and safe distance confirmed.</label>
+      <label><input type="checkbox" class="chk"> Checked mission control dashboard: aircraft, weather, location, and recovery area.</label>
+      <label><input type="checkbox" class="chk"> Roads, buildings, dry vegetation, and power lines are outside the safety radius.</label>
+      <label><input type="checkbox" class="chk"> Rocket secured, igniter connected, fire suppression ready, abort word understood.</label>
+    </div>
+    <div class="buttons">
+      <button id="arm" class="primary" type="button">Arm</button>
+      <button id="disarm" type="button">Disarm</button>
+      <button id="launch" class="danger" type="button">Countdown</button>
+      <button id="abort" class="danger" type="button">Abort</button>
+    </div>
+    <p class="muted">If this page loses the live link, the browser aborts locally and the ESP32 countdown heartbeat times out.</p>
+  </section>
+</main>
+<div id="count"><div><div class="big" id="countnum">10</div><div class="countsub" id="countsub">T-minus 10 seconds</div><button id="abort2" class="danger" type="button">Abort sequence</button></div></div>
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+var statusData={},heartbeatTimer=null,countTimer=null,endsAt=0,live=false,lastStatusAt=0,audioCtx=null;
+var qs=function(id){return document.getElementById(id)};
+function toast(msg,bad){var t=qs('toast');t.textContent=msg;t.style.borderColor=bad?'var(--red)':'var(--green)';t.classList.add('show');setTimeout(function(){t.classList.remove('show')},3200)}
+function api(path,opt,ms){ms=ms||1800;var c=new AbortController();var timer=setTimeout(function(){c.abort()},ms);return fetch(path,Object.assign({cache:'no-store',signal:c.signal},opt||{})).then(function(r){if(!r.ok)return r.json().catch(function(){return {error:r.statusText}}).then(function(b){throw new Error(b.error||r.statusText)});return r.json().catch(function(){return {}})}).finally(function(){clearTimeout(timer)})}
+function setLink(ok){live=ok;qs('link').textContent=ok?'live link ok':'live link lost';qs('status-card').classList.toggle('linklost',!ok);if(!ok&&isCounting())abortSeq('Live link lost - countdown stopped',true)}
+function loadStatus(){api('/api/status',{},1600).then(function(d){lastStatusAt=Date.now();setLink(true);apply(d)}).catch(function(){setLink(false);render()})}
+function apply(d){statusData=d||{};render()}
+function render(){var armed=!!statusData.armed,locked=!!statusData.locked,active=!!statusData.trigger_active,cd=!!statusData.countdown_active;qs('state').textContent=!live?'LINK LOST':locked?'LOCKED':active?'FIRING':armed?'ARMED':'SAFE';qs('state').className='state '+(!live||locked?'bad':active||armed?'warn':'ok');qs('armed').textContent=armed?'Yes':'No';qs('cdstat').textContent=cd?'Active':'Idle';qs('clients').textContent=statusData.clients==null?'-':statusData.clients;qs('attempts').textContent=locked?'Locked':statusData.attempts_left==null?'-':statusData.attempts_left;var checks=[].slice.call(document.querySelectorAll('.chk')).every(function(c){return c.checked});var code=/^[0-9]{6}$/.test(qs('code').value.trim());qs('arm').disabled=!live||armed||locked||!checks||!code;qs('disarm').disabled=!live||!armed;qs('launch').disabled=!live||!armed||locked||isCounting();qs('abort').disabled=!live||(!armed&&!isCounting())}
+function code(){return qs('code').value.trim()}
+function secs(){return Math.max(5,Math.min(60,Number(qs('secs').value)||10))}
+function isCounting(){return !!countTimer||qs('count').style.display==='grid'}
+function beep(freq,dur){try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();var o=audioCtx.createOscillator(),g=audioCtx.createGain();o.frequency.value=freq;o.connect(g);g.connect(audioCtx.destination);g.gain.value=.04;o.start();g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+dur);o.stop(audioCtx.currentTime+dur)}catch(e){}}
+function say(txt){try{if('speechSynthesis'in window&&'SpeechSynthesisUtterance'in window){speechSynthesis.cancel();var u=new SpeechSynthesisUtterance(txt);u.lang='en-US';u.rate=1;speechSynthesis.speak(u);return}}catch(e){}beep(txt==='Ignition'?440:880,txt==='Ignition'?.35:.12)}
+function heartbeat(){api('/api/countdown/heartbeat',{method:'POST'},1200).then(function(){setLink(true)}).catch(function(){setLink(false);abortSeq('Live link lost - countdown stopped',true)})}
+function startHeartbeat(){stopHeartbeat();heartbeatTimer=setInterval(heartbeat,700)}
+function stopHeartbeat(){if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null}}
+function tick(){var leftMs=endsAt-Date.now(),left=Math.max(0,Math.ceil(leftMs/1000));qs('countnum').textContent=left>0?left:'GO';qs('countsub').textContent=left>0?'T-minus '+left+' seconds':'Ignition';if(left<=10&&left>0&&Math.abs(leftMs-left*1000)<180)say(String(left));if(left<=0){clearInterval(countTimer);countTimer=null;stopHeartbeat();say('Ignition');api('/api/trigger',{method:'POST'},2200).then(function(){toast('Trigger command sent',false);setTimeout(function(){qs('count').style.display='none';loadStatus()},700)}).catch(function(e){toast('Trigger failed: '+e.message,true);qs('count').style.display='none';loadStatus()})}}
+function arm(){api('/api/arm?code='+encodeURIComponent(code()),{method:'POST'},1900).then(function(d){qs('code').value='';apply(d);toast('System armed',false)}).catch(function(e){toast('Arm failed: '+e.message,true);loadStatus()})}
+function disarm(){api('/api/disarm',{method:'POST'},1600).then(function(d){stopHeartbeat();apply(d);toast('System disarmed',false)}).catch(function(e){toast('Disarm failed: '+e.message,true)})}
+function startSeq(){var n=secs();api('/api/countdown/start',{method:'POST'},1700).then(function(){endsAt=Date.now()+n*1000;qs('count').style.display='grid';startHeartbeat();clearInterval(countTimer);countTimer=setInterval(tick,100);tick();toast('Countdown started',false)}).catch(function(e){toast('Countdown rejected: '+e.message,true);loadStatus()})}
+function abortSeq(msg,bad){clearInterval(countTimer);countTimer=null;stopHeartbeat();qs('count').style.display='none';api('/api/countdown/abort',{method:'POST'},1200).catch(function(){});toast(msg||'Countdown aborted',!!bad);loadStatus()}
+qs('arm').onclick=arm;qs('disarm').onclick=disarm;qs('launch').onclick=startSeq;qs('abort').onclick=function(){abortSeq('Countdown aborted',false)};qs('abort2').onclick=qs('abort').onclick;document.addEventListener('input',render);loadStatus();setInterval(loadStatus,1800);setInterval(function(){if(live&&lastStatusAt&&Date.now()-lastStatusAt>4200)setLink(false)},1000);
+</script>
+</body>
+</html>)HTMLSAFE";
+
 static const char CAPTIVE_PAGE[] = R"CAPTIVEPAGE(<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -937,7 +1022,7 @@ void restartBleAdvertising() {
 // ─── Route handlers ──────────────────────────────────────────────────────────
 void handleRoot() {
   setCORSHeaders();
-  server.send(200, "text/html", HTML_PAGE);
+  server.send(200, "text/html", HTML_PAGE_SAFE);
 }
 
 void handleCaptivePortal() {

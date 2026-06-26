@@ -10,9 +10,16 @@ let countdownTimer = null;
 let countdownEndsAt = 0;
 let countdownActive = false;
 let externalCountdownEndsAt = 0;
+let externalCountdownBaseEndsAt = 0;
 let externalCountdownActive = false;
-const LAUNCH_CHANNEL = typeof BroadcastChannel !== 'undefined'
+let syncOffsetMs = 0;
+let cameraBleConnected = false;
+let cameraBleDeviceName = '';
+const CAMERA_LAUNCH_CHANNEL = typeof BroadcastChannel !== 'undefined'
   ? new BroadcastChannel('neolabs-launch')
+  : null;
+const CAMERA_BLE_CHANNEL = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('neolabs-ble')
   : null;
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -27,6 +34,15 @@ function bindControls() {
   document.getElementById('cam-record').addEventListener('click', startRecording);
   document.getElementById('cam-stop').addEventListener('click', stopRecording);
   document.getElementById('cam-countdown').addEventListener('click', startCountdown);
+  document.getElementById('cam-sync-offset').addEventListener('input', event => {
+    syncOffsetMs = clamp(Number(event.target.value), -5000, 5000);
+    updateExternalCountdownLabel();
+  });
+  document.getElementById('cam-sync-reset').addEventListener('click', () => {
+    syncOffsetMs = 0;
+    document.getElementById('cam-sync-offset').value = '0';
+    updateExternalCountdownLabel();
+  });
   ['cam-title', 'cam-site', 'cam-mission'].forEach(id => {
     document.getElementById(id).addEventListener('input', drawIdleFrame);
   });
@@ -38,26 +54,33 @@ function bindControls() {
 }
 
 function bindLaunchEvents() {
-  LAUNCH_CHANNEL?.addEventListener('message', event => applyLaunchEvent(event.data));
+  CAMERA_LAUNCH_CHANNEL?.addEventListener('message', event => applyLaunchEvent(event.data));
+  CAMERA_BLE_CHANNEL?.addEventListener('message', event => applyBleState(event.data));
   window.addEventListener('storage', event => {
-    if (event.key !== 'neolabs.launch.lastEvent' || !event.newValue) return;
-    try { applyLaunchEvent(JSON.parse(event.newValue)); } catch (_) {}
+    if (event.key === 'neolabs.launch.lastEvent' && event.newValue) {
+      try { applyLaunchEvent(JSON.parse(event.newValue)); } catch (_) {}
+    }
+    if (event.key === 'neolabs.ble.state' && event.newValue) {
+      try { applyBleState(JSON.parse(event.newValue)); } catch (_) {}
+    }
   });
   try {
     const saved = JSON.parse(localStorage.getItem('neolabs.launch.lastEvent') || 'null');
     if (saved && Date.now() - saved.at < 45000) applyLaunchEvent(saved);
+  } catch (_) {}
+  try {
+    const savedBle = JSON.parse(localStorage.getItem('neolabs.ble.state') || 'null');
+    if (savedBle && Date.now() - savedBle.at < 15000) applyBleState(savedBle);
   } catch (_) {}
 }
 
 function applyLaunchEvent(data) {
   if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
   if (data.type === 'countdown_start' || data.type === 'countdown_tick') {
-    externalCountdownEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || 0) * 1000);
+    externalCountdownBaseEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || 0) * 1000);
+    externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
     externalCountdownActive = true;
-    document.getElementById('cam-count-state').textContent =
-      Math.max(0, Math.ceil((externalCountdownEndsAt - Date.now()) / 1000)) > 0
-        ? 'Live dashboard countdown'
-        : 'Ignition';
+    updateExternalCountdownLabel();
   } else if (data.type === 'ignition') {
     externalCountdownEndsAt = Date.now();
     externalCountdownActive = true;
@@ -69,14 +92,45 @@ function applyLaunchEvent(data) {
   }
 }
 
+function applyBleState(data) {
+  if (!data) return;
+  cameraBleConnected = !!data.connected;
+  cameraBleDeviceName = data.deviceName || '';
+  const label = cameraBleConnected ? (cameraBleDeviceName || 'BLE live') : 'Offline';
+  document.getElementById('cam-ble-state').textContent = label;
+}
+
+function updateExternalCountdownLabel() {
+  if (!externalCountdownActive) return;
+  if (externalCountdownBaseEndsAt) externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
+  const leftMs = externalCountdownEndsAt - Date.now();
+  document.getElementById('cam-count-state').textContent = leftMs > 0
+    ? `Live T-${formatCountdown(leftMs)}`
+    : 'Ignition';
+}
+
 function startClock() {
   const tick = () => {
     const d = new Date();
     document.getElementById('cam-clock').textContent =
       `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    refreshCountdownState();
   };
   tick();
   setInterval(tick, 1000);
+}
+
+function refreshCountdownState() {
+  if (externalCountdownActive) {
+    updateExternalCountdownLabel();
+    return;
+  }
+  if (countdownActive) {
+    const leftMs = countdownEndsAt - Date.now();
+    document.getElementById('cam-count-state').textContent = leftMs > 0
+      ? `Local T-${formatCountdown(leftMs)}`
+      : 'Ignition';
+  }
 }
 
 function pad(n) {
@@ -182,47 +236,97 @@ function drawOverlay(ctx, w, h) {
   const now = new Date();
   const rec = recorder?.state === 'recording';
   const elapsed = rec ? Math.floor((Date.now() - recordStartedAt) / 1000) : 0;
-  const ownCountdown = countdownActive ? Math.max(0, Math.ceil((countdownEndsAt - Date.now()) / 1000)) : null;
-  const liveCountdown = externalCountdownActive ? Math.max(0, Math.ceil((externalCountdownEndsAt - Date.now()) / 1000)) : null;
-  const countdown = ownCountdown ?? liveCountdown;
+  if (externalCountdownActive && externalCountdownBaseEndsAt) {
+    externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
+  }
+  const ownCountdownMs = countdownActive ? countdownEndsAt - Date.now() : null;
+  const liveCountdownMs = externalCountdownActive ? externalCountdownEndsAt - Date.now() : null;
+  const countdownMs = liveCountdownMs ?? ownCountdownMs;
+  const countdownLive = liveCountdownMs != null;
 
   const padPx = Math.round(w * 0.025);
+  const topH = Math.round(h * 0.15);
+  const bottomY = Math.round(h * 0.78);
+  const bottomH = h - bottomY;
+  const accent = countdownMs != null && countdownMs <= 10000 ? '#ffb347' : '#9fd4ff';
   ctx.save();
-  ctx.fillStyle = 'rgba(3,7,19,.58)';
-  ctx.fillRect(0, 0, w, Math.round(h * 0.13));
-  ctx.fillRect(0, Math.round(h * 0.84), w, Math.round(h * 0.16));
+  ctx.fillStyle = 'rgba(3,7,19,.62)';
+  ctx.fillRect(0, 0, w, topH);
+  ctx.fillStyle = 'rgba(3,7,19,.72)';
+  ctx.fillRect(0, bottomY, w, bottomH);
+  ctx.strokeStyle = 'rgba(159,212,255,.38)';
+  ctx.lineWidth = Math.max(1, w * 0.0012);
+  ctx.beginPath();
+  ctx.moveTo(padPx, topH);
+  ctx.lineTo(w - padPx, topH);
+  ctx.moveTo(padPx, bottomY);
+  ctx.lineTo(w - padPx, bottomY);
+  ctx.stroke();
 
   ctx.fillStyle = '#dbe7ff';
-  ctx.font = `700 ${Math.round(w * 0.03)}px Segoe UI, Arial`;
-  ctx.fillText(title, padPx, Math.round(h * 0.055));
-  ctx.font = `500 ${Math.round(w * 0.017)}px Segoe UI, Arial`;
+  ctx.font = `800 ${Math.round(w * 0.027)}px Segoe UI, Arial`;
+  ctx.fillText(title.toUpperCase(), padPx, Math.round(h * 0.055));
+  ctx.font = `600 ${Math.round(w * 0.015)}px Segoe UI, Arial`;
   ctx.fillStyle = '#9fd4ff';
-  ctx.fillText(`${mission}  |  ${site}`, padPx, Math.round(h * 0.095));
+  ctx.fillText(`${mission} / ${site}`, padPx, Math.round(h * 0.102));
 
   ctx.textAlign = 'right';
   ctx.fillStyle = '#c9d6ef';
-  ctx.fillText(now.toLocaleString(), w - padPx, Math.round(h * 0.055));
+  ctx.fillText(now.toLocaleTimeString(), w - padPx, Math.round(h * 0.055));
   ctx.fillStyle = rec ? '#ff4a3d' : '#36f0a0';
-  ctx.fillText(rec ? `REC ${fmtDuration(elapsed)}` : 'STANDBY', w - padPx, Math.round(h * 0.095));
+  ctx.fillText(rec ? `REC ${fmtDuration(elapsed)}` : 'STANDBY', w - padPx, Math.round(h * 0.102));
 
-  if (countdown != null) {
-    const txt = countdown > 0 ? `T-${countdown}` : 'IGNITION';
+  if (countdownMs != null) {
+    const txt = countdownMs > 0 ? `T-${formatCountdown(countdownMs)}` : 'IGNITION';
     ctx.textAlign = 'center';
-    ctx.font = `900 ${Math.round(w * (countdown > 0 ? 0.13 : 0.085))}px Segoe UI, Arial`;
-    ctx.fillStyle = countdown > 10 ? '#ffffff' : countdown > 3 ? '#ffb347' : '#ff4a3d';
+    ctx.font = `900 ${Math.round(w * (countdownMs > 0 ? 0.075 : 0.065))}px Segoe UI, Arial`;
+    ctx.fillStyle = countdownMs > 10000 ? '#ffffff' : countdownMs > 3000 ? '#ffb347' : '#ff4a3d';
     ctx.shadowColor = 'rgba(255,74,61,.85)';
-    ctx.shadowBlur = 22;
+    ctx.shadowBlur = countdownMs <= 10000 ? 24 : 10;
     ctx.fillText(txt, w / 2, h * 0.52);
     ctx.shadowBlur = 0;
+    ctx.font = `700 ${Math.round(w * 0.017)}px Segoe UI, Arial`;
+    ctx.fillStyle = countdownLive ? '#36f0a0' : '#ffb347';
+    ctx.fillText(countdownLive ? 'LIVE CONTROLLER COUNTDOWN' : 'LOCAL CAMERA COUNTDOWN', w / 2, h * 0.58);
   }
 
+  const arcCX = w / 2;
+  const arcY = bottomY + Math.round(bottomH * 0.62);
+  const arcR = Math.round(w * 0.24);
+  ctx.strokeStyle = 'rgba(159,212,255,.42)';
+  ctx.lineWidth = Math.max(2, w * 0.002);
+  ctx.beginPath();
+  ctx.arc(arcCX, arcY, arcR, Math.PI * 1.08, Math.PI * 1.92);
+  ctx.stroke();
+  ctx.strokeStyle = accent;
+  ctx.beginPath();
+  ctx.moveTo(arcCX - arcR * 0.7, arcY - arcR * 0.18);
+  ctx.lineTo(arcCX, arcY - arcR * 0.34);
+  ctx.lineTo(arcCX + arcR * 0.7, arcY - arcR * 0.18);
+  ctx.stroke();
+
   ctx.textAlign = 'left';
-  ctx.font = `600 ${Math.round(w * 0.018)}px Segoe UI, Arial`;
+  drawHudLabel(ctx, padPx, bottomY + bottomH * 0.33, 'LINK', cameraBleConnected ? 'BLE LIVE' : 'OFFLINE', cameraBleConnected ? '#36f0a0' : '#ffb347', w);
+  drawHudLabel(ctx, padPx + w * 0.18, bottomY + bottomH * 0.33, 'SYNC', `${syncOffsetMs} ms`, '#9fd4ff', w);
+  drawHudLabel(ctx, padPx, bottomY + bottomH * 0.68, 'AUDIO', audioStream ? 'MIC ON' : 'MIC OFF', audioStream ? '#36f0a0' : '#ffb347', w);
+  drawHudLabel(ctx, w - padPx - w * 0.18, bottomY + bottomH * 0.33, 'MISSION', mission.toUpperCase(), '#dbe7ff', w);
+  drawHudLabel(ctx, w - padPx - w * 0.18, bottomY + bottomH * 0.68, 'TIME', rec ? fmtDuration(elapsed) : '--:--', '#dbe7ff', w);
+
+  ctx.textAlign = 'center';
+  ctx.font = `800 ${Math.round(w * 0.018)}px Segoe UI, Arial`;
   ctx.fillStyle = '#dbe7ff';
-  ctx.fillText('NEOLABS ROCKETS', padPx, Math.round(h * 0.91));
-  ctx.fillStyle = '#5b6a8f';
-  ctx.fillText('Overlay burned into recording - audio from device microphone', padPx, Math.round(h * 0.955));
+  ctx.fillText('NEOLABS ROCKETS', w / 2, bottomY + bottomH * 0.82);
   ctx.restore();
+}
+
+function drawHudLabel(ctx, x, y, key, value, color, w) {
+  ctx.textAlign = 'left';
+  ctx.font = `700 ${Math.round(w * 0.012)}px Segoe UI, Arial`;
+  ctx.fillStyle = '#5b6a8f';
+  ctx.fillText(key, x, y);
+  ctx.font = `900 ${Math.round(w * 0.018)}px Segoe UI, Arial`;
+  ctx.fillStyle = color;
+  ctx.fillText(value, x, y + Math.round(w * 0.023));
 }
 
 function drawIdleFrame() {
@@ -286,9 +390,9 @@ function startCountdown() {
 }
 
 function updateCountdown() {
-  const left = Math.max(0, Math.ceil((countdownEndsAt - Date.now()) / 1000));
-  document.getElementById('cam-count-state').textContent = left > 0 ? `T-${left}s` : 'Ignition';
-  if (left <= 0) {
+  const leftMs = countdownEndsAt - Date.now();
+  document.getElementById('cam-count-state').textContent = leftMs > 0 ? `Local T-${formatCountdown(leftMs)}` : 'Ignition';
+  if (leftMs <= 0) {
     clearInterval(countdownTimer);
     countdownActive = false;
     beep(440, 0.45);
@@ -324,6 +428,14 @@ function fmtDuration(totalSeconds) {
   const m = Math.floor(totalSeconds / 60);
   const s = totalSeconds % 60;
   return `${pad(m)}:${pad(s)}`;
+}
+
+function formatCountdown(ms) {
+  const totalTenths = Math.ceil(Math.max(0, ms) / 100);
+  const minutes = Math.floor(totalTenths / 600);
+  const seconds = Math.floor((totalTenths % 600) / 10);
+  const tenths = totalTenths % 10;
+  return `${pad(minutes)}:${pad(seconds)}.${tenths}`;
 }
 
 function setStatus(title, detail, state) {

@@ -67,12 +67,7 @@
         <div class="launch-link-state" id="ble-state">Not connected</div>
       </div>
       <div class="launch-actions-top">
-        <div class="launch-mode-switch" role="tablist" aria-label="Controller link mode">
-          <button class="launch-mode-btn active" id="launch-mode-ble" type="button" role="tab" aria-selected="true">Bluetooth</button>
-          <button class="launch-mode-btn" id="launch-mode-wifi" type="button" role="tab" aria-selected="false">WiFi AP</button>
-        </div>
         <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
-        <button class="sp-secondary" id="wifi-connect" type="button">Check WiFi</button>
         <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
       </div>
     </div>
@@ -91,12 +86,6 @@
       </div>
 
       <div class="launch-command-panel">
-        <div class="launch-wifi-row" id="wifi-settings">
-          <div class="sp-field">
-            <label for="wifi-host">WiFi controller address</label>
-            <input id="wifi-host" type="url" spellcheck="false" value="http://192.168.4.1">
-          </div>
-        </div>
         <div class="sp-row">
           <div class="sp-field">
             <label for="ble-code">Arming code</label>
@@ -119,7 +108,7 @@
           <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
           <button class="sp-secondary danger" id="ble-abort" type="button" disabled>Abort</button>
         </div>
-        <div class="finder-note" id="ble-note">Choose Bluetooth or the ESP32 WiFi AP. Arming always requires the checklist and code; active link loss during countdown forces a safe stop on the ESP32.</div>
+        <div class="finder-note" id="ble-note">Connect the ESP32 over BLE. Arming always requires the checklist and code; active link loss during countdown forces a safe stop on the ESP32.</div>
       </div>
     </div>
   </section>

@@ -40,7 +40,7 @@ header{position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-
 #hdr-clock{font-variant-numeric:tabular-nums;color:var(--muted);letter-spacing:.08em}
 .hdr-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);flex-shrink:0}
 
-main{max-width:1200px;margin:0 auto;padding:24px 18px 48px;position:relative;z-index:1}
+main{max-width:1320px;margin:0 auto;padding:30px 24px 52px;position:relative;z-index:1}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;
   padding:20px;backdrop-filter:blur(8px);
   box-shadow:0 12px 36px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.03)}
@@ -50,7 +50,7 @@ main{max-width:1200px;margin:0 auto;padding:24px 18px 48px;position:relative;z-i
 .card-head .lbl{margin-bottom:0}
 .card-head-note{font-size:.72em;color:var(--muted);line-height:1.4;text-align:right}
 
-#status-card{margin-bottom:20px;display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:center}
+#status-card{margin-bottom:24px;display:grid;grid-template-columns:160px 1fr;gap:28px;align-items:center;padding:24px}
 @media(max-width:600px){#status-card{grid-template-columns:1fr}}
 .go-badge{display:flex;flex-direction:column;align-items:center;justify-content:center;
   width:140px;height:140px;border-radius:50%;border:3px solid var(--green);flex-shrink:0;
@@ -62,7 +62,7 @@ main{max-width:1200px;margin:0 auto;padding:24px 18px 48px;position:relative;z-i
 .go-badge.marginal .go-label{color:var(--amber)}
 .go-badge.nogo .go-label{color:var(--red)}
 .go-sub{font-size:.58em;letter-spacing:.2em;color:var(--muted);margin-top:4px;text-transform:uppercase}
-.factors{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;flex:1}
+.factors{display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:10px;flex:1}
 .factor{display:flex;align-items:center;justify-content:space-between;gap:8px;
   background:rgba(7,11,22,.5);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:.8em;
   cursor:pointer;transition:opacity .2s,border-color .2s,filter .2s}
@@ -212,9 +212,9 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
   font-weight:700;letter-spacing:.2em;text-transform:uppercase;cursor:pointer;transition:opacity .2s}
 .sp-save:hover{opacity:.85}
 
-.rocket-badge{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;
+.rocket-badge{display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;
   background:rgba(77,159,255,.05);border:1px solid rgba(77,159,255,.15);
-  border-radius:10px;padding:10px 16px;margin-bottom:20px;transition:border-color .2s}
+  border-radius:10px;padding:14px 18px;margin-bottom:24px;transition:border-color .2s}
 .rocket-badge:hover{border-color:rgba(77,159,255,.35)}
 .rb-name{color:var(--ice);font-weight:700;font-size:.82em;letter-spacing:.06em;margin-right:2px}
 .rb-chip{background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:20px;
@@ -230,20 +230,18 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .derived-item .v{font-size:1.2em;font-weight:800;color:var(--silver);margin-top:6px}
 .derived-item .s{font-size:.72em;color:var(--muted);margin-top:5px;line-height:1.35}
 
-.launch-ble-card{margin-bottom:20px;border-color:rgba(77,159,255,.2)}
-.launch-link-state{font-size:.78em;color:var(--muted);letter-spacing:.04em}
-.launch-actions-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.launch-mode-switch{display:flex;gap:4px;align-items:center;background:rgba(7,11,22,.55);
-  border:1px solid var(--border);border-radius:8px;padding:4px}
-.launch-mode-btn{border:0;border-radius:6px;background:transparent;color:var(--muted);font-family:var(--font);
-  font-size:.66em;font-weight:800;letter-spacing:.12em;text-transform:uppercase;padding:8px 10px;cursor:pointer}
-.launch-mode-btn.active{background:rgba(77,159,255,.18);color:var(--ice)}
-.launch-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
-.launch-status-panel{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center}
-.launch-metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.launch-command-panel{background:rgba(7,11,22,.36);border:1px solid var(--border);border-radius:10px;padding:14px}
-.launch-wifi-row{margin-bottom:12px}
-.launch-checks{display:grid;gap:8px;margin:12px 0;color:var(--silver);font-size:.82em;line-height:1.4}
+.launch-ble-card{margin:4px 0 24px;border-color:rgba(77,159,255,.24);padding:26px;
+  background:linear-gradient(135deg,rgba(18,26,48,.72),rgba(11,17,33,.72))}
+.launch-ble-card .card-head{align-items:center;margin-bottom:22px}
+.launch-link-state{font-size:.95em;color:var(--muted);letter-spacing:.04em;margin-top:4px}
+.launch-actions-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.launch-grid{display:grid;grid-template-columns:minmax(390px,.95fr) minmax(460px,1.05fr);gap:22px;align-items:stretch}
+.launch-status-panel{display:grid;grid-template-columns:158px minmax(0,1fr);gap:22px;align-items:center}
+.launch-status-panel .go-badge{width:150px;height:150px}
+.launch-metrics{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.launch-metrics .derived-item{min-height:118px}
+.launch-command-panel{background:rgba(7,11,22,.44);border:1px solid rgba(77,159,255,.14);border-radius:10px;padding:18px}
+.launch-checks{display:grid;gap:9px;margin:14px 0;color:var(--silver);font-size:.84em;line-height:1.45}
 .launch-checks label{display:flex;gap:8px;align-items:flex-start;background:rgba(255,255,255,.03);
   border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 10px}
 .launch-checks input{margin-top:2px;accent-color:var(--green)}
@@ -283,9 +281,11 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .camera-controls{align-self:start}
 .cam-buttons{display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:10px}
 .countdown-btn{width:100%;margin:6px 0 2px}
+.camera-link-card{background:rgba(7,11,22,.45);border:1px solid rgba(77,159,255,.16);
+  border-radius:10px;padding:12px;margin-bottom:12px}
+.cam-link-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.sync-button{align-self:end;height:38px}
 .cam-note{margin-top:12px}
-.camera-stage::after{content:'REC';position:absolute;right:16px;top:14px;color:rgba(255,255,255,.35);
-  font-size:.68em;font-weight:800;letter-spacing:.2em;border:1px solid rgba(255,255,255,.16);border-radius:6px;padding:4px 8px}
 
 @media(max-width:540px){
   .hdr-right{gap:12px;width:100%;justify-content:flex-end}

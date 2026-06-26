@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NeoLabs - Launch Camera</title>
 <link rel="stylesheet" href="/styles.css">
+<script defer src="/bluetooth.js"></script>
 <script defer src="/camera.js"></script>
 </head>
 <body>
@@ -65,6 +66,15 @@
       </div>
       <button class="sp-secondary countdown-btn" id="cam-countdown" type="button" disabled>Start 30s Countdown</button>
 
+      <div class="sp-sec">Device Link</div>
+      <div class="camera-link-card">
+        <div class="launch-link-state" id="ble-state">Not connected</div>
+        <div class="cam-link-actions">
+          <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
+          <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
+        </div>
+      </div>
+
       <div class="sp-sec">Overlay</div>
       <div class="sp-row full">
         <div class="sp-field"><label for="cam-title">Title</label><input id="cam-title" value="NeoLabs Launch"></div>
@@ -96,15 +106,20 @@
           </select>
         </div>
       </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-sync-offset">Live sync ms</label><input id="cam-sync-offset" type="number" min="-5000" max="5000" step="50" value="0"></div>
+        <button class="sp-secondary sync-button" id="cam-sync-reset" type="button">Reset Sync</button>
+      </div>
 
       <div class="sp-sec">Recording State</div>
       <div class="sp-derived">
         <div class="sp-dr"><span class="sp-dk">Duration</span><span class="sp-dv" id="cam-duration">00:00</span></div>
         <div class="sp-dr"><span class="sp-dk">Countdown</span><span class="sp-dv" id="cam-count-state">Idle</span></div>
+        <div class="sp-dr"><span class="sp-dk">BLE Link</span><span class="sp-dv" id="cam-ble-state">Offline</span></div>
         <div class="sp-dr"><span class="sp-dk">Audio</span><span class="sp-dv" id="cam-audio-state">Pending</span></div>
         <div class="sp-dr"><span class="sp-dk">Download</span><span class="sp-dv" id="cam-download">None</span></div>
       </div>
-      <div class="finder-note cam-note">The downloaded file contains the canvas overlay and microphone audio when permission is granted.</div>
+      <div class="finder-note cam-note">The camera uses live dashboard countdown timing when available, or the local 30 second countdown button as a fallback.</div>
     </aside>
   </section>
 </main>

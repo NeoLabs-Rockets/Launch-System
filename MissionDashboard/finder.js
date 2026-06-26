@@ -141,7 +141,7 @@ async function analyze() {
   }
   setCenter(cfg.lat, cfg.lon, false);
   setStatus('Loading OSM safety data', 'Retrying public Overpass mirrors if needed.', 'warn');
-  document.getElementById('lf-summary').textContent = 'Analyzing roads, power lines, housing, airports, trees, and open fields.';
+  document.getElementById('lf-summary').textContent = 'Analyzing roads, power lines, settlement areas, airports, trees, rail, public places, and open fields.';
   try {
     const r = await fetch(`/api/osm-safety?lat=${cfg.lat.toFixed(5)}&lon=${cfg.lon.toFixed(5)}&radiusKm=${cfg.radiusKm}`);
     if (!r.ok) throw new Error(`OSM ${r.status}`);
@@ -175,7 +175,8 @@ function normalizeFeatures(elements) {
       tags,
       points,
       category: featureCategory(tags),
-      name: tags.name || tags.ref || tags.operator || ''
+      name: tags.name || tags.ref || tags.operator || '',
+      isArea: isAreaFeature(el, tags, points)
     };
   }).filter(f => f.points.length && f.category !== 'other');
 }
@@ -183,19 +184,36 @@ function normalizeFeatures(elements) {
 function featureCategory(tags) {
   if (tags.aeroway) return 'airport';
   if (tags.power === 'line' || tags.power === 'minor_line' || tags.power === 'tower' || tags.power === 'pole') return 'power';
-  if (tags.building || ['residential', 'industrial', 'commercial', 'retail', 'construction'].includes(tags.landuse)) return 'housing';
+  if (tags.place && ['city', 'town', 'village', 'hamlet', 'suburb', 'neighbourhood', 'quarter'].includes(tags.place)) return 'settlement';
+  if (tags.building || ['residential', 'industrial', 'commercial', 'retail', 'construction', 'brownfield', 'garages', 'cemetery', 'farmyard'].includes(tags.landuse) ||
+      ['school', 'kindergarten', 'college', 'university', 'hospital', 'clinic', 'place_of_worship', 'community_centre'].includes(tags.amenity)) return 'housing';
+  if (tags.railway) return 'rail';
   if (tags.highway) return ['motorway', 'trunk', 'primary', 'secondary'].includes(tags.highway) ? 'highway' : 'road';
   if (tags.natural === 'wood' || tags.natural === 'tree' || tags.natural === 'tree_row' ||
-      ['forest', 'orchard', 'vineyard'].includes(tags.landuse)) return 'trees';
-  if (['farmland', 'meadow', 'grass', 'allotments', 'recreation_ground'].includes(tags.landuse) ||
-      ['park', 'pitch'].includes(tags.leisure)) return 'field';
+      ['forest', 'orchard', 'vineyard', 'plant_nursery'].includes(tags.landuse)) return 'trees';
+  if (['park', 'playground', 'sports_centre', 'recreation_ground'].includes(tags.leisure)) return 'public';
+  if (['farmland', 'meadow', 'grass', 'allotments'].includes(tags.landuse) ||
+      ['grassland', 'heath', 'scrub', 'bare_rock', 'sand'].includes(tags.natural) ||
+      tags.leisure === 'pitch') return 'field';
   return 'other';
+}
+
+function isAreaFeature(el, tags, points) {
+  if (points.length < 3) return false;
+  if (el.type === 'relation') return true;
+  if (tags.area === 'yes' || tags.building || tags.landuse || tags.leisure || tags.aeroway || tags.amenity || tags.place) return true;
+  if (points.length > 3) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    return Math.abs(first.lat - last.lat) < 1e-6 && Math.abs(first.lon - last.lon) < 1e-6;
+  }
+  return false;
 }
 
 function scoreCandidates(cfg, features) {
   const grid = candidateGrid(cfg);
   return grid.map(p => scorePoint(p, cfg, features))
-    .filter(c => c.score >= cfg.minScore)
+    .filter(c => !c.rejected && c.score >= cfg.minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, cfg.results);
 }
@@ -218,11 +236,30 @@ function candidateGrid(cfg) {
 function scorePoint(p, cfg, features) {
   const nearest = {
     road: Infinity, highway: Infinity, power: Infinity, housing: Infinity,
-    airport: Infinity, trees: Infinity, field: Infinity
+    settlement: Infinity, airport: Infinity, trees: Infinity, field: Infinity,
+    rail: Infinity, public: Infinity
   };
+  const inside = new Set();
   for (const f of features) {
     const d = distanceToFeatureM(p, f);
     nearest[f.category] = Math.min(nearest[f.category] ?? Infinity, d);
+    if (d === 0 && f.isArea) inside.add(f.category);
+  }
+
+  const hardRejects = [];
+  if (inside.has('housing')) hardRejects.push('inside housing or built-up land');
+  if (inside.has('settlement')) hardRejects.push('inside mapped settlement');
+  if (inside.has('airport')) hardRejects.push('inside airport/helipad area');
+  if (inside.has('public')) hardRejects.push('inside park/playground/public recreation area');
+  if (inside.has('trees')) hardRejects.push('inside trees/wooded area');
+  if (nearest.housing < Math.max(50, cfg.housingM * 0.35)) hardRejects.push(`too close to buildings/housing ${Math.round(nearest.housing)}m`);
+  if (nearest.settlement < Math.max(150, cfg.housingM * 0.6)) hardRejects.push(`too close to town/settlement ${Math.round(nearest.settlement)}m`);
+  if (nearest.airport < cfg.airportM * 0.7) hardRejects.push(`too close to airport ${Math.round(nearest.airport)}m`);
+  if (nearest.highway < Math.max(60, cfg.highwayM * 0.45)) hardRejects.push(`too close to highway ${Math.round(nearest.highway)}m`);
+  if (nearest.rail < Math.max(80, cfg.roadM)) hardRejects.push(`too close to rail ${Math.round(nearest.rail)}m`);
+  if (nearest.power < Math.max(80, cfg.powerM * 0.45)) hardRejects.push(`too close to power line ${Math.round(nearest.power)}m`);
+  if (hardRejects.length) {
+    return { ...p, score: 0, nearest, risks: hardRejects, rejected: true };
   }
 
   let score = 100;
@@ -230,21 +267,33 @@ function scorePoint(p, cfg, features) {
   score -= penalty(nearest.highway, cfg.highwayM, 26);
   score -= penalty(nearest.power, cfg.powerM, 28);
   score -= penalty(nearest.housing, cfg.housingM, 35);
+  score -= penalty(nearest.settlement, cfg.housingM * 1.4, 42);
   score -= penalty(nearest.airport, cfg.airportM, 45);
   score -= penalty(nearest.trees, cfg.treesM, 18);
-  if (nearest.field < 180) score += 10;
+  score -= penalty(nearest.rail, Math.max(150, cfg.roadM * 1.5), 24);
+  score -= penalty(nearest.public, Math.max(180, cfg.housingM * 0.55), 24);
+  if (nearest.field < 180) score += 12;
+  else if (nearest.field < 350) score += 5;
+  else score -= 22;
   if (nearest.airport < cfg.airportM * 0.55) score -= 40;
+  if (nearest.housing < cfg.housingM * 0.65) score = Math.min(score, 52);
+  if (nearest.settlement < cfg.housingM) score = Math.min(score, 48);
+  if (nearest.field > 600) score = Math.min(score, 68);
   score = Math.round(clamp(score, 0, 100));
 
   const risks = [];
+  if (nearest.settlement < cfg.housingM * 1.4) risks.push(`settlement ${Math.round(nearest.settlement)}m`);
   if (nearest.housing < cfg.housingM) risks.push(`housing ${Math.round(nearest.housing)}m`);
   if (nearest.power < cfg.powerM) risks.push(`power ${Math.round(nearest.power)}m`);
   if (nearest.highway < cfg.highwayM) risks.push(`highway ${Math.round(nearest.highway)}m`);
   if (nearest.road < cfg.roadM) risks.push(`road ${Math.round(nearest.road)}m`);
+  if (nearest.rail < Math.max(150, cfg.roadM * 1.5)) risks.push(`rail ${Math.round(nearest.rail)}m`);
   if (nearest.airport < cfg.airportM) risks.push(`airport ${Math.round(nearest.airport)}m`);
   if (nearest.trees < cfg.treesM) risks.push(`trees ${Math.round(nearest.trees)}m`);
-  if (!risks.length) risks.push(nearest.field < 180 ? 'open field nearby' : 'clear by map data');
-  return { ...p, score, nearest, risks };
+  if (nearest.public < Math.max(180, cfg.housingM * 0.55)) risks.push(`public area ${Math.round(nearest.public)}m`);
+  if (nearest.field > 350) risks.push('no mapped open field nearby');
+  if (!risks.length) risks.push(nearest.field < 180 ? 'mapped open field nearby' : 'clear by map data');
+  return { ...p, score, nearest, risks, rejected: false };
 }
 
 function penalty(distM, bufferM, weight) {
@@ -253,9 +302,47 @@ function penalty(distM, bufferM, weight) {
 }
 
 function distanceToFeatureM(p, feature) {
+  if (feature.isArea && pointInPolygon(p, feature.points)) return 0;
   let best = Infinity;
   for (const q of feature.points) best = Math.min(best, haversine(p.lat, p.lon, q.lat, q.lon) * 1000);
+  if (feature.points.length > 1) {
+    const points = feature.points;
+    for (let i = 0; i < points.length - 1; i++) {
+      best = Math.min(best, distanceToSegmentM(p, points[i], points[i + 1]));
+    }
+    if (feature.isArea) best = Math.min(best, distanceToSegmentM(p, points[points.length - 1], points[0]));
+  }
   return best;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lon;
+    const yi = polygon[i].lat;
+    const xj = polygon[j].lon;
+    const yj = polygon[j].lat;
+    const intersect = ((yi > point.lat) !== (yj > point.lat)) &&
+      (point.lon < (xj - xi) * (point.lat - yi) / ((yj - yi) || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function distanceToSegmentM(p, a, b) {
+  const cosLat = Math.max(0.2, Math.cos(p.lat * DEG));
+  const ax = (a.lon - p.lon) * 111320 * cosLat;
+  const ay = (a.lat - p.lat) * 111320;
+  const bx = (b.lon - p.lon) * 111320 * cosLat;
+  const by = (b.lat - p.lat) * 111320;
+  const vx = bx - ax;
+  const vy = by - ay;
+  const len2 = vx * vx + vy * vy;
+  if (!len2) return Math.sqrt(ax * ax + ay * ay);
+  const t = clamp((-(ax * vx + ay * vy)) / len2, 0, 1);
+  const x = ax + vx * t;
+  const y = ay + vy * t;
+  return Math.sqrt(x * x + y * y);
 }
 
 function renderMap(cfg, candidates, features) {
@@ -299,13 +386,18 @@ function renderHazards(features) {
     highway: '#ffb347',
     power: '#ff4a3d',
     housing: '#ff4a3d',
+    settlement: '#ff4a3d',
     airport: '#ff4a3d',
     trees: '#36f0a0',
-    field: '#36f0a0'
+    field: '#36f0a0',
+    rail: '#c9d6ef',
+    public: '#ffb347'
   };
   features.filter(f => f.category !== 'field').slice(0, 700).forEach(f => {
     const color = colors[f.category] || '#c9d6ef';
-    if (f.points.length > 1) {
+    if (f.isArea && f.points.length > 2) {
+      L.polygon(f.points.map(p => [p.lat, p.lon]), { color, fillColor: color, fillOpacity: 0.08, weight: 2, opacity: 0.35 }).addTo(hazardLayer);
+    } else if (f.points.length > 1) {
       L.polyline(f.points.map(p => [p.lat, p.lon]), { color, weight: 2, opacity: 0.35 }).addTo(hazardLayer);
     } else {
       L.circleMarker([f.points[0].lat, f.points[0].lon], { radius: 3, color, fillColor: color, fillOpacity: 0.45, weight: 1 }).addTo(hazardLayer);
