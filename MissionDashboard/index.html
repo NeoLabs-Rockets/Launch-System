@@ -4,12 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NeoLabs · Mission Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="/styles.css">
-<script defer src="/shell-nav.js"></script>
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 <div id="loader">
-  <div class="spin"></div>
+  <div class="spin"><i></i></div>
   <div class="load-txt" id="load-txt">Acquiring location…</div>
 </div>
 
@@ -40,10 +41,11 @@
   </div>
   <div class="hdr-right">
     <nav class="top-nav" aria-label="Mission tools">
-      <a href="/" class="active">Dashboard</a>
-      <a href="/finder.html">Location Finder</a>
-      <a href="/camera.html">Camera</a>
+      <a href="/" data-view="dashboard" class="active">Dashboard</a>
+      <a href="/finder.html" data-view="finder">Location Finder</a>
+      <a href="/camera.html" data-view="camera">Camera</a>
     </nav>
+    <button class="hdr-launch" id="hdr-launch" type="button">▲ Launch Console</button>
     <div class="hdr-dot"></div>
     <div class="hdr-loc" id="hdr-loc">—</div>
     <div id="hdr-clock">—</div>
@@ -52,6 +54,8 @@
 </header>
 
 <main>
+<!-- ══════════════════════════════ DASHBOARD ══════════════════════════════ -->
+<section class="view active" id="view-dashboard">
   <div id="err-banner" class="err-banner"></div>
   <div id="net-banner" class="net-banner">
     <div>
@@ -75,58 +79,26 @@
       </div>
     </div>
 
-  <section class="card launch-ble-card" id="launch-ble-card">
-    <div class="card-head">
-      <div>
-        <div class="lbl">Launch Controller</div>
-        <div class="launch-link-state" id="ble-state">Not connected</div>
-      </div>
-      <div class="launch-actions-top">
-        <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
-        <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
-      </div>
-    </div>
-    <div class="launch-grid">
-      <div class="launch-status-panel">
-        <div class="go-badge marginal" id="ble-go-badge">
-          <div class="go-label" id="ble-go-label">LINK</div>
+    <section class="card launch-ble-card" id="launch-summary-card">
+      <div class="card-head">
+        <div>
+          <div class="lbl">Launch Controller</div>
+          <div class="launch-link-state" id="ds-link">Not connected</div>
+        </div>
+        <div class="go-badge marginal" id="ds-go-badge">
+          <div class="go-label" id="ds-go-label">LINK</div>
           <div class="go-sub">Controller</div>
         </div>
-        <div class="launch-metrics">
-          <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div><div class="s">Password protected</div></div>
-          <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ble-countdown">Idle</div><div class="s" id="ble-countdown-sub">No active sequence</div></div>
-          <div class="derived-item"><div class="k">Clients</div><div class="v" id="ble-clients">0</div><div class="s" id="ble-clients-sub">Viewers depend on BLE stack/browser support</div></div>
-          <div class="derived-item"><div class="k">Attempts</div><div class="v" id="ble-attempts">-</div><div class="s">Lockout on repeated wrong code</div></div>
-        </div>
       </div>
-
-      <div class="launch-command-panel">
-        <div class="sp-row">
-          <div class="sp-field">
-            <label for="ble-code">Arming code</label>
-            <input id="ble-code" type="password" inputmode="numeric" maxlength="6" placeholder="123456">
-          </div>
-          <div class="sp-field">
-            <label for="ble-count-seconds">Countdown s</label>
-            <input id="ble-count-seconds" type="number" min="5" max="60" value="10">
-          </div>
-        </div>
-        <div class="launch-checks">
-          <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
-          <label><input type="checkbox" class="ble-check"> Checked mission control dashboard: aircraft, weather, launch location</label>
-          <label><input type="checkbox" class="ble-check"> Power lines, roads, buildings, and bystanders outside safety radius</label>
-          <label><input type="checkbox" class="ble-check"> Rocket secured, igniter connected, abort word understood</label>
-        </div>
-        <div class="launch-buttons">
-          <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
-          <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>
-          <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
-          <button class="sp-secondary danger" id="ble-abort" type="button" disabled>Abort</button>
-        </div>
-        <div class="finder-note" id="ble-note">Connect the ESP32 over BLE. Arming always requires the checklist and code; active link loss during countdown forces a safe stop on the ESP32.</div>
+      <div class="launch-summary-grid">
+        <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
+        <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Passcode protected</div></div>
+        <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
+        <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">0</div><div class="s">BLE centrals on controller</div></div>
       </div>
-    </div>
-  </section>
+      <button class="sp-save lc-open-btn" id="open-launch-dashboard" type="button">▲ Open Launch Console</button>
+      <div class="finder-note">Connect, complete the checklist, arm with the passcode, and run the countdown from the guided Launch Console. Active link loss during countdown forces a safe stop on the ESP32.</div>
+    </section>
   </section>
 
   <div class="rocket-badge" id="rocket-badge" role="button" tabindex="0" aria-label="Edit rocket profile">
@@ -288,9 +260,303 @@
       <div class="empty-state">Fetching airspace data…</div>
     </div>
   </div>
+</section>
+
+<!-- ══════════════════════════════ FINDER ══════════════════════════════ -->
+<section class="view finder-page" id="view-finder">
+  <div id="finder-banner" class="net-banner warn">
+    <div><span class="net-dot"></span><span id="finder-status">Waiting for location</span></div>
+    <span id="finder-detail">OpenStreetMap safety data loads through the local reliability proxy.</span>
+  </div>
+
+  <section class="finder-layout">
+    <aside class="card finder-controls">
+      <div class="lbl">Search Area</div>
+      <div class="sp-row">
+        <div class="sp-field">
+          <label for="lf-lat">Latitude</label>
+          <input id="lf-lat" type="number" step="0.0001">
+        </div>
+        <div class="sp-field">
+          <label for="lf-lon">Longitude</label>
+          <input id="lf-lon" type="number" step="0.0001">
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field">
+          <label for="lf-radius">Radius km</label>
+          <input id="lf-radius" type="number" min="1" max="15" step="0.5" value="5">
+        </div>
+        <div class="sp-field">
+          <label for="lf-spacing">Grid m</label>
+          <input id="lf-spacing" type="number" min="120" max="1000" step="20" value="300">
+        </div>
+      </div>
+      <div class="finder-actions">
+        <button class="sp-secondary" id="lf-locate" type="button">Use GPS</button>
+        <button class="sp-save" id="lf-analyze" type="button">Analyze</button>
+      </div>
+
+      <div class="sp-sec">Hazards To Enforce</div>
+      <div class="lf-toggle-grid" id="lf-toggles">
+        <label><input type="checkbox" class="lf-tog" id="lf-en-road" checked> Roads</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-highway" checked> Highways</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-power" checked> Power lines</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-housing" checked> Housing</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-settlement" checked> Settlements</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-rail" checked> Railways</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-airport" checked> Airports</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-trees" checked> Trees</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-public" checked> Public areas</label>
+        <label><input type="checkbox" class="lf-tog" id="lf-en-water" checked> Water</label>
+      </div>
+
+      <div class="sp-sec">Safety Buffers (m)</div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-road">Roads</label><input id="lf-road" type="number" min="20" max="800" value="180"></div>
+        <div class="sp-field"><label for="lf-highway">Highways</label><input id="lf-highway" type="number" min="50" max="1500" value="500"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-power">Power lines</label><input id="lf-power" type="number" min="50" max="1500" value="450"></div>
+        <div class="sp-field"><label for="lf-housing">Housing</label><input id="lf-housing" type="number" min="100" max="2000" value="900"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-settlement">Settlements</label><input id="lf-settlement" type="number" min="150" max="3000" value="1000"></div>
+        <div class="sp-field"><label for="lf-rail">Railways</label><input id="lf-rail" type="number" min="50" max="1500" value="250"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-airport">Airports</label><input id="lf-airport" type="number" min="500" max="10000" step="250" value="5000"></div>
+        <div class="sp-field"><label for="lf-trees">Trees</label><input id="lf-trees" type="number" min="20" max="1000" value="250"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-public">Public areas</label><input id="lf-public" type="number" min="50" max="1500" value="300"></div>
+        <div class="sp-field"><label for="lf-water">Water</label><input id="lf-water" type="number" min="20" max="1500" value="200"></div>
+      </div>
+
+      <div class="sp-sec">Scoring</div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="lf-minscore">Min score</label><input id="lf-minscore" type="number" min="0" max="100" value="62"></div>
+        <div class="sp-field"><label for="lf-results">Results</label><input id="lf-results" type="number" min="5" max="60" value="15"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field">
+          <label for="lf-sort">Rank by</label>
+          <select id="lf-sort">
+            <option value="score">Best safety score</option>
+            <option value="distance">Closest to center</option>
+            <option value="field">Most open field</option>
+          </select>
+        </div>
+        <div class="sp-field">
+          <label for="lf-fieldpref">Open field</label>
+          <select id="lf-fieldpref">
+            <option value="prefer">Prefer open fields</option>
+            <option value="require">Require open field</option>
+            <option value="ignore">Don't weight fields</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="finder-note">Map scoring is a filter, not permission. Verify owner approval, local rules, NOTAMs, people, wind, fire risk, and the site in person.</div>
+    </aside>
+
+    <section class="finder-map-wrap">
+      <div id="finder-map"></div>
+      <div class="finder-legend" id="finder-legend">
+        <span><i class="lg-good"></i> Best</span>
+        <span><i class="lg-warn"></i> Marginal</span>
+        <span><i class="lg-bad"></i> Avoid</span>
+      </div>
+    </section>
+  </section>
+
+  <section class="card finder-feature-card" id="finder-feature-card" style="display:none">
+    <div class="lbl">Mapped Features Found</div>
+    <div class="lf-feature-counts" id="lf-feature-counts"></div>
+  </section>
+
+  <section class="card finder-results-card">
+    <div class="card-head">
+      <div class="lbl">Ranked Candidates</div>
+      <div class="card-head-note" id="lf-summary">No analysis yet.</div>
+    </div>
+    <div id="lf-results-table" class="empty-state">Choose a center point and run analysis.</div>
+  </section>
+</section>
+
+<!-- ══════════════════════════════ CAMERA ══════════════════════════════ -->
+<section class="view camera-page" id="view-camera">
+  <div id="cam-banner" class="net-banner warn">
+    <div><span class="net-dot"></span><span id="cam-status">Camera idle</span></div>
+    <span id="cam-detail">Allow camera and microphone access to record launch footage with overlay and sound.</span>
+  </div>
+
+  <section class="camera-layout">
+    <div class="camera-stage card">
+      <video id="cam-source" playsinline muted></video>
+      <canvas id="cam-canvas" width="1280" height="720"></canvas>
+    </div>
+
+    <aside class="card camera-controls">
+      <div class="lbl">Recorder</div>
+      <div class="cam-buttons">
+        <button class="sp-save" id="cam-record" type="button" disabled>Start Recording</button>
+        <button class="sp-secondary danger" id="cam-stop" type="button" disabled>Stop</button>
+      </div>
+
+      <div class="sp-sec">Launch Link</div>
+      <div class="camera-launch-card">
+        <div class="launch-link-state" id="cam-ble-state">Offline</div>
+        <button class="sp-save lc-open-btn" id="open-launch-camera" type="button" style="margin-top:10px">▲ Open Launch Console</button>
+        <div class="finder-note cam-note">The overlay follows the shared device countdown automatically. Connect and arm from the Launch Console.</div>
+      </div>
+
+      <div class="sp-sec">Overlay</div>
+      <div class="sp-row full">
+        <div class="sp-field"><label for="cam-title">Title</label><input id="cam-title" value="NeoLabs Launch"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-site">Site</label><input id="cam-site" value="Launch Site"></div>
+        <div class="sp-field"><label for="cam-mission">Mission</label><input id="cam-mission" value="Flight Test"></div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-quality">Quality</label>
+          <select id="cam-quality">
+            <option value="1280x720">720p</option>
+            <option value="1920x1080">1080p</option>
+          </select>
+        </div>
+        <div class="sp-field"><label for="cam-facing">Camera</label>
+          <select id="cam-facing">
+            <option value="environment">Back</option>
+            <option value="user">Front</option>
+          </select>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-fps">FPS</label><input id="cam-fps" type="number" min="24" max="60" value="30"></div>
+        <div class="sp-field"><label for="cam-audio">Audio</label>
+          <select id="cam-audio">
+            <option value="on">Mic on</option>
+            <option value="off">Mic off</option>
+          </select>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-field"><label for="cam-telemetry">Telemetry</label>
+          <select id="cam-telemetry">
+            <option value="on">Show live data</option>
+            <option value="off">Hide live data</option>
+          </select>
+        </div>
+        <div class="sp-field"><label for="cam-sync-offset">Live sync ms</label><input id="cam-sync-offset" type="number" min="-5000" max="5000" step="50" value="0"></div>
+      </div>
+
+      <div class="sp-sec">Recording State</div>
+      <div class="sp-derived">
+        <div class="sp-dr"><span class="sp-dk">Duration</span><span class="sp-dv" id="cam-duration">00:00</span></div>
+        <div class="sp-dr"><span class="sp-dk">Countdown</span><span class="sp-dv" id="cam-count-state">Idle</span></div>
+        <div class="sp-dr"><span class="sp-dk">Audio</span><span class="sp-dv" id="cam-audio-state">Pending</span></div>
+        <div class="sp-dr"><span class="sp-dk">Download</span><span class="sp-dv" id="cam-download">None</span></div>
+      </div>
+      <div class="finder-note cam-note">Video overlay follows the actual launch countdown. TTS plays through the device speaker and is captured in the video when microphone audio is enabled.</div>
+    </aside>
+  </section>
+</section>
 </main>
 
 <footer id="footer-ts">NeoLabs Rockets · Mission Dashboard · Auto-refreshes every 5 min</footer>
+
+<!-- ══════════════════════════ LAUNCH CONSOLE WIZARD ══════════════════════════ -->
+<div class="lc-overlay" id="launch-modal" aria-hidden="true">
+  <div class="lc-dialog" role="dialog" aria-modal="true" aria-label="Launch Console">
+    <div class="lc-head">
+      <div>
+        <div class="lbl">Launch Console</div>
+        <div class="lc-link" id="lc-link-state">Not connected</div>
+      </div>
+      <div class="go-badge marginal" id="ble-go-badge">
+        <div class="go-label" id="ble-go-label">LINK</div>
+        <div class="go-sub">Status</div>
+      </div>
+      <button class="sp-close" id="lc-close" type="button" aria-label="Close launch console">✕</button>
+    </div>
+
+    <div class="lc-steps" id="lc-steps">
+      <button class="lc-pip active" data-step="0" type="button"><b>1</b><span>Connect</span></button>
+      <button class="lc-pip" data-step="1" type="button"><b>2</b><span>Checklist</span></button>
+      <button class="lc-pip" data-step="2" type="button"><b>3</b><span>Arm</span></button>
+      <button class="lc-pip" data-step="3" type="button"><b>4</b><span>Launch</span></button>
+    </div>
+
+    <div class="lc-body">
+      <section class="lc-panel active" data-panel="0">
+        <h3>Connect the controller</h3>
+        <p>Pair the NeoLabs ESP32 over Bluetooth. A single shared link drives every view for maximum reliability.</p>
+        <div class="lc-actions">
+          <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
+          <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
+        </div>
+        <div class="lc-metrics">
+          <div class="derived-item"><div class="k">Link</div><div class="v" id="lc-m-link">Offline</div></div>
+          <div class="derived-item"><div class="k">Clients</div><div class="v" id="ble-clients">0</div><div class="s" id="ble-clients-sub">ESP32-reported centrals</div></div>
+        </div>
+      </section>
+
+      <section class="lc-panel" data-panel="1">
+        <h3>Pre-flight checklist</h3>
+        <p>Every item must be confirmed before the controller can be armed.</p>
+        <div class="launch-checks">
+          <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
+          <label><input type="checkbox" class="ble-check"> Mission control checked: aircraft, weather, launch location</label>
+          <label><input type="checkbox" class="ble-check"> Power lines, roads, buildings, and bystanders outside safety radius</label>
+          <label><input type="checkbox" class="ble-check"> Rocket secured, igniter connected, abort word understood</label>
+        </div>
+      </section>
+
+      <section class="lc-panel" data-panel="2">
+        <h3>Arm the controller</h3>
+        <p>Enter the 6-digit arming passcode. Repeated wrong codes lock the controller until reboot.</p>
+        <div class="sp-row">
+          <div class="sp-field">
+            <label for="ble-code">Arming code</label>
+            <input id="ble-code" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+          </div>
+        </div>
+        <div class="lc-actions">
+          <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
+          <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>
+        </div>
+        <div class="lc-metrics">
+          <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div></div>
+          <div class="derived-item"><div class="k">Attempts left</div><div class="v" id="ble-attempts">-</div></div>
+        </div>
+      </section>
+
+      <section class="lc-panel" data-panel="3">
+        <h3>Launch countdown</h3>
+        <div class="lc-countdown-big" id="ble-countdown">Idle</div>
+        <div class="lc-cd-sub" id="ble-countdown-sub">No active sequence</div>
+        <div class="sp-row">
+          <div class="sp-field">
+            <label for="ble-count-seconds">Countdown seconds</label>
+            <input id="ble-count-seconds" type="number" min="5" max="60" value="10">
+          </div>
+        </div>
+        <div class="launch-buttons">
+          <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
+          <button class="sp-secondary danger" id="ble-abort" type="button" disabled>Abort</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="lc-foot">
+      <button class="sp-secondary" id="lc-back" type="button" disabled>Back</button>
+      <div class="finder-note" id="ble-note">Connect the ESP32 over BLE to begin.</div>
+      <button class="sp-secondary" id="lc-next" type="button">Next</button>
+    </div>
+  </div>
+</div>
 
 <div class="s-overlay" id="settings-overlay"></div>
 <aside id="settings-panel" aria-hidden="true">
@@ -424,7 +690,11 @@
   </div>
 </aside>
 
+<script src="/fx.js" defer></script>
 <script src="/app.js" defer></script>
+<script src="/finder.js" defer></script>
+<script src="/camera.js" defer></script>
 <script src="/bluetooth.js" defer></script>
+<script src="/nav.js" defer></script>
 </body>
 </html>

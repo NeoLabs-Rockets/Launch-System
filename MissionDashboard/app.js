@@ -49,6 +49,15 @@ let selectedProfileId = profileStore.selectedProfileId;
 let rocketProfile = getSelectedProfile();
 let rocketModel = computeRocketModel(rocketProfile);
 
+// Never let a single unexpected error leave the operator staring at a frozen
+// loader — surface it and keep the rest of the dashboard responsive.
+window.addEventListener('error', e => {
+  console.error('[dashboard error]', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', e => {
+  console.error('[dashboard rejection]', e.reason);
+});
+
 window.addEventListener('DOMContentLoaded', () => {
   drawTicks();
   startClock();
@@ -59,6 +68,10 @@ window.addEventListener('DOMContentLoaded', () => {
   renderStatus();
   renderDataLink();
   load('load-txt', 'Acquiring location…');
+
+  // Failsafe: whatever happens with geolocation or the first fetch, never leave
+  // the loading overlay covering the dashboard indefinitely.
+  setTimeout(hideLoader, 12000);
 
   navigator.geolocation.getCurrentPosition(
     async pos => {
@@ -258,6 +271,18 @@ function pad(n) {
   return String(n).padStart(2, '0');
 }
 
+// Animate a numeric element toward a new value via the shared FX layer, with a
+// safe fallback when FX isn't loaded or the value isn't a finite number.
+function animNum(id, value, opts) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (window.NeoFX?.countUp) return window.NeoFX.countUp(el, value, opts);
+  opts = opts || {};
+  el.textContent = Number.isFinite(value)
+    ? (opts.prefix || '') + value.toFixed(opts.decimals || 0) + (opts.suffix || '')
+    : '—';
+}
+
 function startAutoRefresh() {
   if (fullRefreshTimer) clearInterval(fullRefreshTimer);
   if (renderRefreshTimer) clearInterval(renderRefreshTimer);
@@ -275,11 +300,13 @@ async function reverseGeocode() {
   try {
     const r = await fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${userLat}&lon=${userLon}&format=json`,
-      { headers: { 'Accept-Language': 'en' } }
+      { headers: { 'Accept-Language': 'en' }, signal: timeoutSignal(6000) }
     );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    const city = d.address.city || d.address.town || d.address.village || d.address.county || '';
-    const country = d.address.country_code?.toUpperCase() || '';
+    const addr = d.address || {};
+    const city = addr.city || addr.town || addr.village || addr.county || '';
+    const country = addr.country_code?.toUpperCase() || '';
     const coord = `${Math.abs(userLat).toFixed(4)}°${userLat >= 0 ? 'N' : 'S'} ${Math.abs(userLon).toFixed(4)}°${userLon >= 0 ? 'E' : 'W'}`;
     document.getElementById('hdr-loc').textContent = city ? `${city}, ${country} · ${coord}` : coord;
   } catch (_) {
@@ -833,7 +860,7 @@ function renderRocketModel() {
   document.getElementById('rocket-motor-class').textContent = model.profile.motorClass;
   document.getElementById('rocket-mass').textContent = `${Math.round(model.profile.launchMassG)} g`;
   document.getElementById('rocket-apogee').textContent = `${Math.round(model.apogeeM)} m`;
-  document.getElementById('fm-apogee').textContent = `${Math.round(model.apogeeM)} m`;
+  animNum('fm-apogee', Math.round(model.apogeeM), { suffix: ' m' });
   document.getElementById('fm-apogee-sub').textContent =
     model.apogeeSource === 'published'
       ? `${model.profile.publishedMotorCodesByClass?.[model.profile.motorClass] || model.profile.motorClass} manufacturer value · sim ${Math.round(model.simulatedApogeeM)} m`
@@ -856,7 +883,7 @@ function renderWeather() {
   const c = weather.current;
   const wx = wmoInfo(c.weather_code);
   document.getElementById('wx-icon').textContent = wx.icon;
-  document.getElementById('wx-temp').textContent = Math.round(c.temperature_2m);
+  animNum('wx-temp', Math.round(c.temperature_2m));
   document.getElementById('wx-desc').textContent = weatherStatus === 'ok'
     ? wx.label
     : `${wx.label} (cached ${fmtAge(weatherLastUpdate)})`;
@@ -893,17 +920,19 @@ function renderWeatherEmpty() {
 
 function renderWind() {
   const c = weather.current;
-  document.getElementById('wind-speed').textContent = Math.round(c.wind_speed_10m);
-  document.getElementById('wind-gust').textContent = Math.round(c.wind_gusts_10m);
-  document.getElementById('wind-deg').textContent = Math.round(c.wind_direction_10m);
+  animNum('wind-speed', Math.round(c.wind_speed_10m));
+  animNum('wind-gust', Math.round(c.wind_gusts_10m));
+  animNum('wind-deg', Math.round(c.wind_direction_10m));
   document.getElementById('wind-from').textContent = 'FROM ' + degToCompass(c.wind_direction_10m);
-  document.getElementById('wind-arrow').setAttribute('transform', `rotate(${c.wind_direction_10m},65,65)`);
+  // CSS transform (with transform-origin in the stylesheet) so the needle eases
+  // smoothly to the new heading instead of snapping.
+  document.getElementById('wind-arrow').style.transform = `rotate(${c.wind_direction_10m}deg)`;
 }
 
 function renderAtmosphere() {
   const c = weather.current;
   const hum = c.relative_humidity_2m;
-  document.getElementById('hum-val').textContent = hum;
+  animNum('hum-val', hum);
   document.getElementById('hum-bar').style.width = `${hum}%`;
   const T = c.temperature_2m;
   const gamma = Math.log(hum / 100) + (17.62 * T) / (243.12 + T);
@@ -911,7 +940,7 @@ function renderAtmosphere() {
   document.getElementById('dewpoint').textContent = dp;
 
   const pres = Math.round(c.surface_pressure);
-  document.getElementById('pres-val').textContent = pres;
+  animNum('pres-val', pres);
   document.getElementById('pres-sub').textContent =
     pres > 1013 ? 'Above standard' : pres < 1013 ? 'Below standard' : 'Standard (1013 hPa)';
 }

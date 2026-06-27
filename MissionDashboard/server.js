@@ -16,6 +16,28 @@ const OVERPASS_ENDPOINTS = [
 
 const aircraftCache = new Map();
 const osmCache = new Map();
+const MAX_CACHE_ENTRIES = 200;
+
+// Keep the in-memory caches bounded so a long-running controller never leaks
+// memory from unique lat/lon/dist combinations. Oldest entries are evicted first
+// (Map preserves insertion order).
+function cacheSet(cache, key, value) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    cache.delete(oldest);
+  }
+}
+
+// A mission-control tool must not be taken down by a single bad upstream
+// response or a rejected promise — log and keep serving.
+process.on('uncaughtException', err => {
+  console.error('[uncaughtException]', err);
+});
+process.on('unhandledRejection', err => {
+  console.error('[unhandledRejection]', err);
+});
 
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname)));
@@ -110,6 +132,11 @@ function overpassQuery(lat, lon, radiusKm) {
   relation["natural"~"^(grassland|heath|scrub|bare_rock|sand)$"](${box});
   way["leisure"~"^(park|playground|pitch|sports_centre|recreation_ground)$"](${box});
   relation["leisure"~"^(park|playground|pitch|sports_centre|recreation_ground)$"](${box});
+  way["natural"="water"](${box});
+  relation["natural"="water"](${box});
+  way["waterway"~"^(river|stream|canal|drain)$"](${box});
+  way["landuse"~"^(reservoir|basin)$"](${box});
+  relation["landuse"~"^(reservoir|basin)$"](${box});
 );
 out body geom center qt;`;
 }
@@ -166,7 +193,7 @@ app.get('/api/osm-safety', async (req, res) => {
 
   try {
     const data = await fetchOverpassWithRetry(overpassQuery(lat, lon, radiusKm));
-    osmCache.set(key, { ts: Date.now(), data });
+    cacheSet(osmCache, key, { ts: Date.now(), data });
     res.set('X-NeoLabs-Cache', 'miss');
     res.json(data);
   } catch (e) {
@@ -191,7 +218,7 @@ app.get('/api/aircraft', async (req, res) => {
   try {
     const url = `https://api.airplanes.live/v2/point/${lat}/${lon}/${dist}`;
     const data = await fetchAircraftWithRetry(url);
-    aircraftCache.set(key, { ts: Date.now(), data });
+    cacheSet(aircraftCache, key, { ts: Date.now(), data });
     res.set('X-NeoLabs-Cache', 'miss');
     res.json(data);
   } catch (e) {
@@ -205,10 +232,24 @@ app.get('/api/aircraft', async (req, res) => {
   }
 });
 
+// Unknown API routes get a clean JSON 404 instead of silently returning the
+// dashboard HTML (which would break client-side JSON parsing).
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'unknown endpoint' });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.listen(PORT, '127.0.0.1', () => {
+const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  NeoLabs · Mission Dashboard\n  http://localhost:${PORT}\n`);
+});
+
+server.on('error', err => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[fatal] Port ${PORT} is already in use. Is the dashboard already running?`);
+    process.exit(1);
+  }
+  console.error('[server error]', err);
 });
