@@ -19,6 +19,7 @@
   let externalCountdownBaseEndsAt = 0;
   let externalCountdownActive = false;
   let externalCountdownTotalMs = 0;
+  let ignitionAt = 0;
   let syncOffsetMs = 0;
   let cameraBleConnected = false;
   let cameraBleDeviceName = '';
@@ -115,13 +116,14 @@
       externalCountdownActive = true;
       updateExternalCountdownLabel();
     } else if (data.type === 'ignition') {
-      externalCountdownEndsAt = Date.now();
-      externalCountdownActive = true;
-      setText('cam-count-state', 'Ignition');
-      setTimeout(() => { externalCountdownActive = false; externalCountdownTotalMs = 0; }, 3000);
+      ignitionAt = Date.now();
+      externalCountdownEndsAt = ignitionAt;
+      externalCountdownActive = true; // keep drawing T+ until recording stops
+      setText('cam-count-state', 'T+0:00 — Liftoff');
     } else if (data.type === 'abort') {
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
+      ignitionAt = 0;
       lastCountdownSpoken = null;
       setText('cam-count-state', 'Aborted');
     }
@@ -319,16 +321,27 @@
   }
 
   function drawCountdown(ctx, w, h, ms, u) {
-    const cx = w / 2;
-    const cy = h * 0.46;
-    const r = Math.round(108 * u);
-    const total = externalCountdownTotalMs || Math.max(1000, ms);
-    const frac = ms > 0 ? Math.max(0, Math.min(1, ms / total)) : 0;
-    const col = ms > 10000 ? '#9fd4ff' : ms > 3000 ? '#ffb347' : '#ff4a3d';
+    const pad = Math.round(60 * u);
+    const r = Math.round(130 * u);
+    // Bottom-right, sitting above the telemetry strip
+    const cx = w - pad - r - Math.round(18 * u);
+    const cy = h - pad - Math.round(100 * u) - r;
+
+    const postIgnition = ignitionAt > 0;
+    const elapsedMs = postIgnition ? Date.now() - ignitionAt : 0;
+    const total = externalCountdownTotalMs || Math.max(1000, ms > 0 ? ms : 10000);
+    const frac = postIgnition ? 1 : (ms > 0 ? Math.max(0, Math.min(1, ms / total)) : 0);
+    const col = postIgnition ? '#36f0a0' : (ms > 10000 ? '#9fd4ff' : ms > 3000 ? '#ffb347' : '#ff4a3d');
+
+    // Subtle dark backdrop so ring reads against any background
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + Math.round(14 * u), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(3,7,19,.55)';
+    ctx.fill();
 
     // Track + progress arc
-    ctx.lineWidth = Math.max(3, 6 * u);
-    ctx.strokeStyle = 'rgba(159,212,255,.18)';
+    ctx.lineWidth = Math.max(3, 7 * u);
+    ctx.strokeStyle = 'rgba(159,212,255,.15)';
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
@@ -339,18 +352,32 @@
     ctx.stroke();
     ctx.lineCap = 'butt';
 
-    // Number
-    const txt = ms > 0 ? formatCountdown(ms) : 'IGNITION';
+    // Timer text
     ctx.textAlign = 'center';
     ctx.fillStyle = '#fff';
-    ctx.font = `900 ${Math.round((ms > 0 ? 86 : 60) * u)}px system-ui, Segoe UI, Arial`;
     ctx.shadowColor = col;
-    ctx.shadowBlur = Math.round((ms <= 10000 ? 26 : 12) * u);
-    ctx.fillText(ms > 0 ? `T-${txt}` : txt, cx, cy + Math.round((ms > 0 ? 18 : 16) * u));
+    ctx.shadowBlur = Math.round(20 * u);
+
+    if (postIgnition) {
+      ctx.font = `900 ${Math.round(72 * u)}px system-ui, Segoe UI, Arial`;
+      ctx.fillText(`T+${formatCountdown(elapsedMs)}`, cx, cy + Math.round(22 * u));
+      ctx.shadowBlur = 0;
+      ctx.font = `700 ${Math.round(17 * u)}px system-ui, Segoe UI, Arial`;
+      ctx.fillStyle = '#36f0a0';
+      ctx.fillText('ELAPSED', cx, cy + r + Math.round(28 * u));
+    } else if (ms > 0) {
+      ctx.font = `900 ${Math.round(80 * u)}px system-ui, Segoe UI, Arial`;
+      ctx.fillText(`T-${formatCountdown(ms)}`, cx, cy + Math.round(22 * u));
+      ctx.shadowBlur = 0;
+      ctx.font = `700 ${Math.round(17 * u)}px system-ui, Segoe UI, Arial`;
+      ctx.fillStyle = '#9fd4ff';
+      ctx.fillText('LIVE COUNTDOWN', cx, cy + r + Math.round(28 * u));
+    } else {
+      ctx.font = `900 ${Math.round(56 * u)}px system-ui, Segoe UI, Arial`;
+      ctx.fillText('IGNITION', cx, cy + Math.round(18 * u));
+      ctx.shadowBlur = 0;
+    }
     ctx.shadowBlur = 0;
-    ctx.font = `700 ${Math.round(18 * u)}px system-ui, Segoe UI, Arial`;
-    ctx.fillStyle = '#36f0a0';
-    ctx.fillText('LIVE DEVICE COUNTDOWN', cx, cy + r + Math.round(34 * u));
   }
 
   function drawTelemetry(ctx, w, h, pad, u, ctx2) {
@@ -430,7 +457,10 @@
   function stopRecording() {
     if (recorder?.state === 'recording') recorder.stop();
     clearInterval(durationTimer);
-    setText('cam-count-state', externalCountdownActive ? 'Live' : 'Idle');
+    externalCountdownActive = false;
+    externalCountdownTotalMs = 0;
+    ignitionAt = 0;
+    setText('cam-count-state', 'Idle');
     document.getElementById('cam-record').disabled = false;
     document.getElementById('cam-stop').disabled = true;
     setStatus('Processing download', 'Preparing the recorded WebM file.', 'warn');

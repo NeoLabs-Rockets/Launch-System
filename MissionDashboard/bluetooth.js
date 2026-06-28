@@ -18,6 +18,7 @@ const BLE_CHANNEL = typeof BroadcastChannel !== 'undefined'
 let launchCodeMemory = '';
 let launchCountdownTimer = null;
 let launchHeartbeatTimer = null;
+let blePingTimer = null;
 let launchCountdownEndsAt = 0;
 let launchCountdownActive = false;
 let launchLastSpokenSecond = null;
@@ -206,6 +207,7 @@ async function connectBleDevice(device) {
   setLaunchState(`Linked to ${bleLastKnownName}`, 'ok');
   storeBleState();
   await sendBle({ cmd: 'status' });
+  startBlePing();
   resumeRestoredCountdown();
   if (lcOpen && lcStep === 0) goStep(1);
   renderLaunch();
@@ -224,6 +226,7 @@ function onBleStatusChanged(event) {
 }
 
 async function disconnectBle() {
+  stopBlePing();
   if (launchCountdownActive) await abortLaunchCountdown();
   try { bleDevice?.gatt?.disconnect(); } catch (_) {}
   onBleDisconnected();
@@ -235,6 +238,7 @@ function onBleDisconnected() {
   bleServer = null;
   bleCommand = null;
   bleStatus = null;
+  stopBlePing();
   stopLaunchHeartbeat();
   if (wasControllingCountdown) {
     persistActiveLaunch();
@@ -326,6 +330,27 @@ function startLaunchHeartbeat() {
 function stopLaunchHeartbeat() {
   clearInterval(launchHeartbeatTimer);
   launchHeartbeatTimer = null;
+}
+
+function startBlePing() {
+  stopBlePing();
+  blePingTimer = setInterval(async () => {
+    if (!bleConnected || !bleCommand) return;
+    // Active write attempt: if GATT has silently dropped, writeValueWithResponse throws
+    // and we catch it here to trigger a clean disconnect rather than waiting for the OS
+    // gattserverdisconnected event (which can be delayed by many seconds).
+    try {
+      const body = JSON.stringify({ cmd: 'status', sid: BLE_SESSION, seq: Date.now() });
+      await bleCommand.writeValueWithResponse(new TextEncoder().encode(body));
+    } catch (_) {
+      onBleDisconnected();
+    }
+  }, 2000);
+}
+
+function stopBlePing() {
+  clearInterval(blePingTimer);
+  blePingTimer = null;
 }
 
 async function abortLaunchCountdown() {
@@ -509,8 +534,15 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked) {
 }
 
 function checkLaunchLinkHealth() {
-  if (bleConnected && bleLastStatusAt && Date.now() - bleLastStatusAt > 3500) {
-    setLaunchState('BLE status stale — waiting for ESP32 heartbeat', 'warn');
+  if (bleConnected && bleLastStatusAt) {
+    const staleMs = Date.now() - bleLastStatusAt;
+    if (staleMs > 8000) {
+      // Ping has fired 4+ times with no response — treat as a dead connection
+      setLaunchState('BLE link lost (no response for 8 s) — reconnect', 'bad');
+      onBleDisconnected();
+    } else if (staleMs > 3500) {
+      setLaunchState('BLE status stale — waiting for ESP32', 'warn');
+    }
   }
   renderLaunch();
 }

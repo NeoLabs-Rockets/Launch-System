@@ -302,13 +302,13 @@
     if (en.trees && inside.has('trees')) hardRejects.push('inside woodland');
     if (en.water && inside.has('water')) hardRejects.push('inside open water');
     // Proximity rejections
-    if (en.housing && nearest.housing < Math.max(50, buf.housing * 0.35)) hardRejects.push(`housing ${Math.round(nearest.housing)}m`);
-    if (en.settlement && nearest.settlement < Math.max(150, buf.settlement * 0.6)) hardRejects.push(`settlement ${Math.round(nearest.settlement)}m`);
+    if (en.housing && nearest.housing < Math.max(150, buf.housing * 0.55)) hardRejects.push(`housing ${Math.round(nearest.housing)}m`);
+    if (en.settlement && nearest.settlement < Math.max(600, buf.settlement * 0.85)) hardRejects.push(`settlement ${Math.round(nearest.settlement)}m`);
     if (en.airport && nearest.airport < buf.airport * 0.7) hardRejects.push(`airport ${Math.round(nearest.airport)}m`);
-    if (en.highway && nearest.highway < Math.max(60, buf.highway * 0.45)) hardRejects.push(`highway ${Math.round(nearest.highway)}m`);
-    if (en.rail && nearest.rail < Math.max(60, buf.rail * 0.5)) hardRejects.push(`rail ${Math.round(nearest.rail)}m`);
-    if (en.power && nearest.power < Math.max(60, buf.power * 0.45)) hardRejects.push(`power ${Math.round(nearest.power)}m`);
-    if (en.water && nearest.water < Math.max(30, buf.water * 0.5)) hardRejects.push(`water ${Math.round(nearest.water)}m`);
+    if (en.highway && nearest.highway < Math.max(300, buf.highway * 0.85)) hardRejects.push(`highway ${Math.round(nearest.highway)}m`);
+    if (en.rail && nearest.rail < Math.max(80, buf.rail * 0.55)) hardRejects.push(`rail ${Math.round(nearest.rail)}m`);
+    if (en.power && nearest.power < Math.max(80, buf.power * 0.5)) hardRejects.push(`power ${Math.round(nearest.power)}m`);
+    if (en.water && nearest.water < Math.max(50, buf.water * 0.5)) hardRejects.push(`water ${Math.round(nearest.water)}m`);
     if (cfg.fieldPref === 'require' && nearest.field > 350) hardRejects.push('no open field nearby');
     if (hardRejects.length) return { ...p, score: 0, nearest, risks: hardRejects, rejected: true };
 
@@ -398,10 +398,9 @@
     drawSearchRadius();
     renderHazards(features);
     candidates.forEach((c, i) => {
-      const cls = c.score >= 78 ? 'good' : c.score >= 62 ? 'warn' : 'bad';
-      const color = cls === 'good' ? '#36f0a0' : cls === 'warn' ? '#ffb347' : '#ff4a3d';
+      if (c.score < 78) return; // only plot green (safe) candidates
       L.circleMarker([c.lat, c.lon], {
-        radius: i === 0 ? 9 : 6, color, fillColor: color, fillOpacity: 0.75, weight: 2
+        radius: i === 0 ? 9 : 6, color: '#36f0a0', fillColor: '#36f0a0', fillOpacity: 0.75, weight: 2
       }).addTo(candidateLayer).bindPopup(candidatePopup(c, i));
     });
     const b = bboxFor(cfg);
@@ -434,7 +433,8 @@
   }
 
   function candidatePopup(c, i) {
-    return `<b>#${i + 1} · score ${c.score}</b><br>${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}<br>${c.risks.join('<br>')}`;
+    const geUrl = `https://earth.google.com/web/@${c.lat.toFixed(5)},${c.lon.toFixed(5)},0a,500d,0h,0t,0r`;
+    return `<b>#${i + 1} · score ${c.score}</b><br>${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}<br>${c.risks.join('<br>')}<br><a href="${geUrl}" target="_blank" rel="noopener">Open in Google Earth ↗</a>`;
   }
 
   function renderFeatureCounts(features) {
@@ -467,7 +467,7 @@
           const cls = c.score >= 78 ? 'good' : c.score >= 62 ? 'warn' : 'bad';
           const dist = haversine(cfg.lat, cfg.lon, c.lat, c.lon);
           const field = Number.isFinite(c.nearest.field) ? `${Math.round(c.nearest.field)} m` : '—';
-          const osmUrl = `https://www.openstreetmap.org/?mlat=${c.lat.toFixed(5)}&mlon=${c.lon.toFixed(5)}#map=17/${c.lat.toFixed(5)}/${c.lon.toFixed(5)}`;
+          const geUrl = `https://earth.google.com/web/@${c.lat.toFixed(5)},${c.lon.toFixed(5)},0a,500d,0h,0t,0r`;
           return `<tr>
             <td>#${i + 1}</td>
             <td><span class="score-pill ${cls}">${c.score}</span></td>
@@ -475,7 +475,7 @@
             <td>${dist.toFixed(2)} km</td>
             <td style="color:var(--muted)">${escapeHtml(c.risks.slice(0, 4).join(' · '))}</td>
             <td class="${c.nearest.field < 180 ? 'ac-dist-far' : 'ac-dist-close'}">${field}</td>
-            <td><button class="lf-focus" data-i="${i}" type="button">Focus</button> <a href="${osmUrl}" target="_blank" rel="noopener" style="color:var(--ice)">OSM</a></td>
+            <td><button class="lf-focus" data-i="${i}" type="button">Focus</button> <a href="${geUrl}" target="_blank" rel="noopener" style="color:var(--ice)">Earth ↗</a></td>
           </tr>`;
         }).join('')}</tbody>
       </table>`;

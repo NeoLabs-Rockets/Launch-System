@@ -288,10 +288,6 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .mission-console-head{display:flex;align-items:flex-end;justify-content:space-between;gap:22px;margin-bottom:18px}
 .mission-console h1{font-size:2.2em;line-height:1;margin:0;color:#fff;letter-spacing:0}
 .mission-console p{max-width:560px;margin:8px 0 0;color:var(--muted);font-size:.92em;line-height:1.45}
-.mission-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;min-width:420px}
-.mission-strip div{background:rgba(7,11,22,.58);border:1px solid rgba(77,159,255,.14);border-radius:8px;padding:10px 12px}
-.mission-strip span{display:block;font-size:.56em;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
-.mission-strip b{display:block;margin-top:5px;color:var(--ice);font-size:.9em;letter-spacing:.05em}
 .launch-ble-card{margin:0;border-color:rgba(77,159,255,.24);padding:26px;
   background:linear-gradient(135deg,rgba(18,26,48,.82),rgba(11,17,33,.82))}
 .launch-ble-card .card-head{align-items:center;margin-bottom:22px}
@@ -365,7 +361,6 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
   .finder-map-wrap,#finder-map{min-height:520px}
   .camera-layout{grid-template-columns:1fr}
   .mission-console-head{align-items:flex-start;flex-direction:column}
-  .mission-strip{min-width:0;width:100%;grid-template-columns:1fr}
   .launch-grid,.launch-status-panel{grid-template-columns:1fr}
   .launch-metrics{grid-template-columns:1fr}
 }
