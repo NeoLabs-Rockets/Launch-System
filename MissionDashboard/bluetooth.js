@@ -143,29 +143,38 @@ async function restoreGrantedBle() {
   if (!hasBluetooth()) {
     setLaunchState('Web Bluetooth unavailable in this browser', 'bad');
     renderLaunch();
-    return;
+    return; // BLE not available — console can't help
   }
   if (!navigator.bluetooth.getDevices) {
-    setLaunchState('Open the Launch Console to pair the controller', 'warn');
+    setLaunchState('Connecting…', 'warn');
     renderLaunch();
+    scheduleAutoOpenConsole();
     return;
   }
   try {
     const devices = await navigator.bluetooth.getDevices();
     const candidate = devices.find(d => /^NeoLabs/i.test(d.name || '')) || devices.find(d => d.name === bleLastKnownName);
     if (!candidate) {
-      setLaunchState('Open the Launch Console to pair the controller', 'warn');
+      setLaunchState('No paired controller found', 'warn');
       renderLaunch();
+      scheduleAutoOpenConsole();
       return;
     }
     bleDevice = candidate;
     attachDisconnectListener(candidate);
     setLaunchState(`Reconnecting to ${candidate.name || 'controller'}…`, 'warn');
     await connectBleDevice(candidate);
+    // Successfully reconnected — no need to open console
   } catch (err) {
-    setLaunchState('Open the Launch Console to pair the controller', 'warn');
+    setLaunchState('Could not reconnect — open console to retry', 'warn');
     renderLaunch();
+    scheduleAutoOpenConsole();
   }
+}
+
+function scheduleAutoOpenConsole() {
+  // Give the page ~1 s to finish rendering before popping the modal
+  setTimeout(() => { if (!bleConnected) openLaunchConsole(); }, 1100);
 }
 
 async function connectBle() {
@@ -206,6 +215,7 @@ async function connectBleDevice(device) {
   bleLastStatusAt = Date.now();
   setLaunchState(`Linked to ${bleLastKnownName}`, 'ok');
   storeBleState();
+  broadcastBleState();
   await sendBle({ cmd: 'status' });
   startBlePing();
   resumeRestoredCountdown();
@@ -240,6 +250,7 @@ function onBleDisconnected() {
   bleStatus = null;
   stopBlePing();
   stopLaunchHeartbeat();
+  broadcastBleState();
   if (wasControllingCountdown) {
     persistActiveLaunch();
     setLaunchState('BLE dropped during countdown — ESP32 will safe-stop on heartbeat loss', 'bad');
@@ -260,6 +271,21 @@ async function armLaunch() {
   if (!isValidCode(code)) {
     setLaunchState('Enter the 6-digit arming code', 'warn');
     return;
+  }
+  // Gate on dashboard GO state — read the badge and any specific NO-GO factors
+  const goBadge = el('go-badge');
+  if (goBadge?.classList.contains('nogo') || goBadge?.classList.contains('marginal')) {
+    const isNogo = goBadge.classList.contains('nogo');
+    const nogoNames = [...document.querySelectorAll('#factors-list .factor:not(.ignored) .chip.nogo, #factors-list .factor:not(.ignored) .chip.marginal')]
+      .map(chip => chip.closest('.factor')?.querySelector('.factor-name')?.textContent)
+      .filter(Boolean);
+    const factorLines = nogoNames.length ? `\n\n${nogoNames.map(n => `• ${n}`).join('\n')}` : '';
+    const label = isNogo ? 'NO-GO' : 'HOLD';
+    const msg = `⚠️ Dashboard is ${label}${factorLines}\n\n${isNogo ? 'Launch conditions are not met.' : 'Conditions are marginal.'} Arm the controller anyway?`;
+    if (!window.confirm(msg)) {
+      setLaunchState(`Arming cancelled — ${label} conditions not cleared`, 'warn');
+      return;
+    }
   }
   try {
     await armWithCode(code);
@@ -335,13 +361,16 @@ function stopLaunchHeartbeat() {
 function startBlePing() {
   stopBlePing();
   blePingTimer = setInterval(async () => {
-    if (!bleConnected || !bleCommand) return;
-    // Active write attempt: if GATT has silently dropped, writeValueWithResponse throws
-    // and we catch it here to trigger a clean disconnect rather than waiting for the OS
-    // gattserverdisconnected event (which can be delayed by many seconds).
+    // Skip during active countdown — the heartbeat (every 700ms) already proves the link
+    // is live. Running both concurrently causes GATT write conflicts that throw and
+    // falsely trigger onBleDisconnected.
+    if (!bleConnected || !bleCommand || launchCountdownActive) return;
     try {
       const body = JSON.stringify({ cmd: 'status', sid: BLE_SESSION, seq: Date.now() });
       await bleCommand.writeValueWithResponse(new TextEncoder().encode(body));
+      // Successful write proves the link is still alive — refresh the staleness clock
+      // so checkLaunchLinkHealth doesn't falsely declare the connection dead.
+      bleLastStatusAt = Date.now();
     } catch (_) {
       onBleDisconnected();
     }
@@ -514,6 +543,23 @@ function renderLaunch() {
   if (next) {
     next.disabled = lcStep >= 3 || !canEnter(lcStep + 1);
     next.style.visibility = lcStep >= 3 ? 'hidden' : 'visible';
+  }
+
+  // Arm panel: mirror the main dashboard GO state so the user sees it without closing the modal
+  const goEl = el('go-badge');
+  const lcNogo = el('lc-nogo-warn');
+  if (lcNogo) {
+    const isNogo = goEl?.classList.contains('nogo');
+    const isHold = goEl?.classList.contains('marginal');
+    if (isNogo || isHold) {
+      lcNogo.textContent = isNogo
+        ? '⚠ Dashboard is NO-GO — launch conditions are not met'
+        : '⚡ Dashboard is on HOLD — conditions are marginal';
+      lcNogo.className = `lc-nogo-warn ${isNogo ? 'nogo' : 'hold'}`;
+      lcNogo.style.display = 'block';
+    } else {
+      lcNogo.style.display = 'none';
+    }
   }
 
   updateLaunchNote(bluetoothSupported, linked, armed, locked);
@@ -712,6 +758,41 @@ function broadcastLaunch(payload) {
   if (typeof window.NeoCameraLaunchEvent === 'function') {
     try { window.NeoCameraLaunchEvent(message); } catch (_) {}
   }
+  // Relay to server SSE so devices on the same network receive the event.
+  // Fire-and-forget: mission control must not stall waiting for the local server.
+  if (payload.type !== 'countdown_tick') {
+    relayToServer(message);
+  } else if (!payload._relayThrottled) {
+    // Throttle ticks to one relay per second (150ms timer fires 6-7x/sec)
+    const now = Date.now();
+    if (!broadcastLaunch._lastRelay || now - broadcastLaunch._lastRelay >= 950) {
+      broadcastLaunch._lastRelay = now;
+      relayToServer(message);
+    }
+  }
+}
+
+function relayToServer(message) {
+  fetch('/api/launch-event', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message)
+  }).catch(() => {});
+}
+
+function broadcastBleState() {
+  const message = {
+    type: 'ble_state',
+    connected: bleConnected,
+    deviceName: bleDevice?.name || bleLastKnownName || '',
+    source: 'launch-dashboard',
+    at: Date.now()
+  };
+  fetch('/api/launch-event', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message)
+  }).catch(() => {});
 }
 
 function storeBleState(extra = {}) {

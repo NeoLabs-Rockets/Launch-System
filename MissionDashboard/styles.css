@@ -462,6 +462,9 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 .lc-panel p{color:var(--muted);font-size:.86em;line-height:1.5;margin-bottom:14px}
 .lc-panel .launch-checks{margin:0}
 .lc-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0 0}
+.lc-nogo-warn{border-radius:8px;padding:10px 14px;font-size:.84em;font-weight:600;letter-spacing:.03em;margin:12px 0 4px;line-height:1.4}
+.lc-nogo-warn.nogo{background:rgba(255,74,61,.12);border:1px solid rgba(255,74,61,.35);color:var(--red)}
+.lc-nogo-warn.hold{background:rgba(255,179,71,.10);border:1px solid rgba(255,179,71,.3);color:var(--amber)}
 .lc-metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
 .lc-metrics .derived-item{min-height:0;padding:12px 14px}
 .lc-countdown-big{font-size:2.8em;font-weight:800;text-align:center;color:#fff;letter-spacing:.04em;

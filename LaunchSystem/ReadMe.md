@@ -49,8 +49,7 @@ with NimBLE-Arduino installed. If future features push it over the limit, change
   *"Ignition"* at zero, then drives the output **HIGH 500 ms later**.
 - **Trigger pulse** — non-blocking HIGH pulse on the trigger pin, then back LOW.
 - **Status LED** â€” solid while armed, 5 Hz blink while firing.
-- **Vibration motor** — haptic feedback for arming, disarming, countdown steps,
-  aborts, lost-link safety stops, ignition, and an armed-idle reminder pulse.
+- **Vibration motor** — distinct haptic patterns for arm, disarm, wrong code, lockout, countdown start, final-second ticks, abort, link-lost safety stop, and ignition. No idle buzz.
 - **Physical ARM button** (optional, disabled by default) â€” toggles arm state in hardware.
 - **REST API** â€” JSON endpoints for automation/testing.
 
@@ -85,7 +84,7 @@ Defined near the top of the sketch:
 | Lockout         | `MAX_ATTEMPTS = 10` wrong codes â†’ locked until reboot |
 | URL             | `http://192.168.4.1` |
 | Pulse length    | `TRIGGER_MS = 2000` ms |
-| Vibration       | `BUZZ_MS = 120` ms/step · `BUZZ_MAX = 5000` ms cap · armed-idle pulse every 5 s |
+| Vibration       | Named patterns via `playHaptic(kind)` — non-blocking sequencer, no idle buzz |
 
 ## Parts list
 
@@ -145,7 +144,7 @@ Base URL: `http://192.168.4.1`
 | `POST` | `/api/arm?code=123456`    | `{ "ok": true, "armed": true }` â€” `401` invalid code (`attempts_left`), `423` locked out |
 | `POST` | `/api/disarm`             | `{ "ok": true, "armed": false }` |
 | `POST` | `/api/trigger`            | `{ "ok": true }` â€” or `403 {"ok":false,"error":"not armed"}` |
-| `POST` | `/api/buzz?ms=120`        | `{ "ok": true }` â€” pulses the motor (`ms` capped at `BUZZ_MAX`) |
+| `POST` | `/api/buzz?ms=120`        | `{ “ok”: true }` — single haptic pulse of `ms` duration |
 
 `/api/status` also reports `locked` and `attempts_left`. Arming requires the
 6-digit global password; triggering requires the system to be armed first:

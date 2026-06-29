@@ -252,7 +252,7 @@ function describeFeed(label, state, ts) {
 function fmtAge(ts) {
   if (!ts) return 'data';
   const mins = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
-  if (mins < 1) return 'just now';
+  if (mins < 1) return `at ${new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
   if (mins < 60) return `${mins} min ago`;
   return `${Math.round(mins / 60)} h ago`;
 }
@@ -1136,15 +1136,23 @@ function toggleIgnoredFactor(factorId) {
 }
 
 function evaluateAirspace(model) {
-  if (aircraftStatus === 'cached' || aircraftStatus === 'ratelimited') {
-    return {
-      status: 'marginal',
-      value: `Using cached airspace ${fmtAge(aircraftLastUpdate)}`
-    };
+  const ageMs = aircraftLastUpdate ? Date.now() - aircraftLastUpdate.getTime() : Infinity;
+  const stale = ageMs > 120000; // > 2 min is genuinely stale
+
+  if (aircraftStatus === 'ratelimited') {
+    return { status: 'marginal', value: `Airspace rate-limited — data ${fmtAge(aircraftLastUpdate)}` };
   }
-  if (aircraftStatus !== 'ok') {
+  // Cached-but-stale: don't evaluate planes, data too old to trust
+  if (aircraftStatus === 'cached' && stale) {
+    return { status: 'marginal', value: `Airspace data ${fmtAge(aircraftLastUpdate)} — may be stale` };
+  }
+  // No data at all
+  if (aircraftStatus !== 'ok' && aircraftStatus !== 'cached') {
     return { status: 'marginal', value: `Need fresh ${model.airspaceKeepoutKm.toFixed(1)} km clear corridor` };
   }
+
+  // Fresh data (either live or recently cached): evaluate actual aircraft positions
+  const cachedNote = aircraftStatus === 'cached' ? ` (${fmtAge(aircraftLastUpdate)})` : '';
   const immediate = aircraft.filter(a =>
     a.dist <= model.airspaceKeepoutKm &&
     (a.alt == null || a.alt <= model.airspaceCeilingM + 300)
@@ -1155,20 +1163,14 @@ function evaluateAirspace(model) {
   );
 
   if (immediate.length) {
-    return {
-      status: 'nogo',
-      value: `${immediate[0].call} at ${immediate[0].dist.toFixed(1)} km`
-    };
+    return { status: 'nogo', value: `${immediate[0].call} at ${immediate[0].dist.toFixed(1)} km${cachedNote}` };
   }
   if (caution.length) {
-    return {
-      status: 'marginal',
-      value: `${caution.length} aircraft near ${model.airspaceKeepoutKm.toFixed(1)} km corridor`
-    };
+    return { status: 'marginal', value: `${caution.length} aircraft near ${model.airspaceKeepoutKm.toFixed(1)} km corridor${cachedNote}` };
   }
   return {
-    status: 'go',
-    value: `${model.airspaceKeepoutKm.toFixed(1)} km clear below ${Math.round(model.airspaceCeilingM)} m`
+    status: aircraftStatus === 'cached' ? 'marginal' : 'go',
+    value: `${model.airspaceKeepoutKm.toFixed(1)} km clear below ${Math.round(model.airspaceCeilingM)} m${cachedNote}`
   };
 }
 

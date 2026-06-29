@@ -1,5 +1,25 @@
 const express = require('express');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const fs = require('fs');
+
+// Minimal .env loader — no extra dependency needed.
+// Lines starting with # are comments; existing env vars take precedence.
+(function loadDotEnv() {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq < 1) continue;
+      const key = t.slice(0, eq).trim();
+      const val = t.slice(eq + 1).trim().replace(/^(['"])(.*)\1$/, '$2');
+      if (key && !(key in process.env)) process.env[key] = val;
+    }
+  } catch (_) {}
+}());
 
 const app = express();
 const PORT = 3456;
@@ -18,6 +38,9 @@ const aircraftCache = new Map();
 const osmCache = new Map();
 const MAX_CACHE_ENTRIES = 200;
 
+// SSE clients for cross-device launch event relay
+const sseClients = new Set();
+
 // Keep the in-memory caches bounded so a long-running controller never leaks
 // memory from unique lat/lon/dist combinations. Oldest entries are evicted first
 // (Map preserves insertion order).
@@ -30,6 +53,35 @@ function cacheSet(cache, key, value) {
   }
 }
 
+// ── Basic Auth ─────────────────────────────────────────────────────────────
+// Set DASHBOARD_PASSWORD in .env (or as an env var) to enable.
+// Leave it unset for local-only use — auth is skipped when the var is absent.
+function requireAuth(req, res, next) {
+  const pw = process.env.DASHBOARD_PASSWORD;
+  if (!pw) return next();
+
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    res.set('WWW-Authenticate', 'Basic realm="NeoLabs Mission Dashboard"');
+    return res.status(401).send('Authentication required');
+  }
+
+  const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+  const colon = decoded.indexOf(':');
+  const supplied = colon >= 0 ? decoded.slice(colon + 1) : decoded;
+
+  // Constant-time compare to resist timing attacks
+  const a = Buffer.from(supplied.padEnd(pw.length));
+  const b = Buffer.from(pw.padEnd(supplied.length));
+  const match = supplied.length === pw.length && crypto.timingSafeEqual(a, b);
+
+  if (!match) {
+    res.set('WWW-Authenticate', 'Basic realm="NeoLabs Mission Dashboard"');
+    return res.status(401).send('Invalid credentials');
+  }
+  next();
+}
+
 // A mission-control tool must not be taken down by a single bad upstream
 // response or a rejected promise — log and keep serving.
 process.on('uncaughtException', err => {
@@ -40,6 +92,7 @@ process.on('unhandledRejection', err => {
 });
 
 app.use(express.json({ limit: '256kb' }));
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname)));
 
 // Proxy aircraft API — browser can't call adsb.fi directly (CORS)
@@ -232,6 +285,28 @@ app.get('/api/aircraft', async (req, res) => {
   }
 });
 
+// ── Cross-device SSE relay ──────────────────────────────────────────────────
+// The laptop holds the BLE connection; phones/tablets on the same WiFi subscribe
+// here and receive countdown events in real time via Server-Sent Events.
+
+app.get('/api/launch-stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
+  sseClients.add(res);
+  req.on('close', () => { sseClients.delete(res); clearInterval(keepAlive); });
+});
+
+app.post('/api/launch-event', (req, res) => {
+  const payload = req.body;
+  if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'bad payload' });
+  const line = `data: ${JSON.stringify(payload)}\n\n`;
+  sseClients.forEach(client => { try { client.write(line); } catch (_) {} });
+  res.json({ ok: true, clients: sseClients.size });
+});
+
 // Unknown API routes get a clean JSON 404 instead of silently returning the
 // dashboard HTML (which would break client-side JSON parsing).
 app.use('/api', (req, res) => {
@@ -242,8 +317,21 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-const server = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  NeoLabs · Mission Dashboard\n  http://localhost:${PORT}\n`);
+function localNetworkIp() {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const iface of ifaces) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return null;
+}
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  const ip = localNetworkIp();
+  console.log(`\n  NeoLabs · Mission Dashboard`);
+  console.log(`  Local:   http://localhost:${PORT}`);
+  if (ip) console.log(`  Network: http://${ip}:${PORT}  ← open this on your phone`);
+  console.log();
 });
 
 server.on('error', err => {

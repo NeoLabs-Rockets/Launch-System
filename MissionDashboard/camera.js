@@ -82,6 +82,7 @@
     const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('neolabs-ble') : null;
     lc?.addEventListener('message', event => applyLaunchEvent(event.data));
     bc?.addEventListener('message', event => applyBleState(event.data));
+    connectLaunchStream();
     window.addEventListener('storage', event => {
       if (event.key === 'neolabs.launch.lastEvent' && event.newValue) {
         try { applyLaunchEvent(JSON.parse(event.newValue)); } catch (_) {}
@@ -553,6 +554,22 @@
       speechSynthesis.cancel();
       speechSynthesis.speak(utterance);
     } catch (_) {}
+  }
+
+  function connectLaunchStream() {
+    if (!window.EventSource) return;
+    const connect = () => {
+      const es = new EventSource('/api/launch-stream');
+      es.onmessage = event => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'ble_state') applyBleState(data);
+          else applyLaunchEvent(data);
+        } catch (_) {}
+      };
+      es.onerror = () => { es.close(); setTimeout(connect, 5000); };
+    };
+    connect();
   }
 
   function setStatus(title, detail, state) {
