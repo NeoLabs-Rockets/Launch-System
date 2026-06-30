@@ -1,4 +1,4 @@
-# NeoLabs Rockets
+# NeoLabs-Rockets Launch System
 
 Rocket systems by NeoLabs — ESP32 launch controller + Node.js mission dashboard.
 
