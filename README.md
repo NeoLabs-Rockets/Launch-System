@@ -2,7 +2,7 @@
 
 # NeoLabs-Rockets Launch System
 
-<img width="1024" height="1024" alt="rocket-icon-1024" src="https://github.com/user-attachments/assets/205f69a8-6dde-4ae3-9347-e46cbaf7c3ac" />
+<img src="https://github.com/user-attachments/assets/205f69a8-6dde-4ae3-9347-e46cbaf7c3ac" width="180" alt="NeoLabs Rockets Logo">
 
 **Rocket systems by NeoLabs — ESP32 launch controller + Node.js mission dashboard.**
 
