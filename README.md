@@ -1,32 +1,22 @@
+<div align="center">
+
 # NeoLabs-Rockets Launch System
 
 <img width="1024" height="1024" alt="rocket-icon-1024" src="https://github.com/user-attachments/assets/205f69a8-6dde-4ae3-9347-e46cbaf7c3ac" />
 
-
-Rocket systems by NeoLabs — ESP32 launch controller + Node.js mission dashboard.
+**Rocket systems by NeoLabs — ESP32 launch controller + Node.js mission dashboard.**
 
 ---
+
+[🚀 Mission Dashboard](#mission-dashboard) · [🛰️ Launch System](#launch-system)
+
+---
+
+</div>
 
 ## Mission Dashboard
 
 A single-page web app that runs on a laptop at the launch site and connects to the ESP32 controller over Bluetooth (BLE).
-
-### Quick start
-
-```bash
-cd MissionDashboard
-npm install        # first time only
-npm start
-```
-
-Open **http://localhost:3456** in Chrome or Edge (Web Bluetooth requires a Chromium browser over localhost or HTTPS).
-
-The server prints a **Network URL** on startup — open that on any phone on the same WiFi to use it as a camera with the live countdown overlay:
-
-```
-  Local:   http://localhost:3456
-  Network: http://192.168.x.x:3456  ← open this on your phone
-```
 
 ### Features
 
@@ -47,8 +37,6 @@ cp MissionDashboard/.env.example MissionDashboard/.env
 DASHBOARD_PASSWORD=your-strong-password
 ```
 
-HTTP Basic Auth is applied to every route (static files, API, and the SSE stream). Leave `DASHBOARD_PASSWORD` blank for local LAN use — auth is skipped entirely when the variable is unset.
-
 ---
 
 ## Launch System
@@ -58,3 +46,11 @@ ESP32 WiFi + BLE launch controller — see [`/LaunchSystem`](LaunchSystem/).
 The ESP32 runs as its own WiFi Access Point and serves a branded web UI with an **arm → launch** workflow, a voice countdown, and a REST API. It also exposes a BLE GATT service used by the Mission Dashboard for a more reliable, guided launch sequence.
 
 See the [LaunchSystem README](LaunchSystem/ReadMe.md) for wiring, pin assignments, parts list, and REST API.
+
+---
+
+<div align="center">
+
+*Made with ❤️ by [Neo](https://github.com/neooriginal) · [NeoLabs Systems](https://github.com/NeoLabs-Systems)*
+
+</div>
