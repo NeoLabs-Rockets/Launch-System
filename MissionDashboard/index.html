@@ -87,9 +87,11 @@
       </div>
       <div class="launch-summary-grid">
         <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
+        <div class="derived-item connection-quality" id="ds-server-quality-card"><div class="k">Server connection</div><div class="v" id="ds-server-quality">Checking…</div><div class="s" id="ds-server-latency">Measuring response time</div></div>
+        <div class="derived-item"><div class="k">Server GO / NO-GO</div><div class="v" id="ds-server-go">HOLD</div><div class="s" id="ds-server-go-sub">Connection check pending</div></div>
         <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
         <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
-        <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">0</div><div class="s">BLE centrals on controller</div></div>
+        <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards connected to server</div></div>
       </div>
       <button class="sp-save lc-open-btn" id="open-launch-dashboard" type="button">▲ Open Launch Console</button>
       <div class="finder-note">Connect, complete the checklist, arm, and run the countdown from the guided Launch Console. Additional devices join with the ESP32 launch code. Active link loss during countdown forces a safe stop.</div>

@@ -404,7 +404,12 @@ app.get('/api/launch-stream', (req, res) => {
   if (!clientId) return res.end();
   sseClients.set(res, { clientId, authorized: !!sessionFor(req) });
   res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
-  req.on('close', () => { sseClients.delete(res); clearInterval(keepAlive); });
+  emitLaunch({ type: 'client_count', clients: sseClients.size });
+  req.on('close', () => {
+    sseClients.delete(res);
+    clearInterval(keepAlive);
+    emitLaunch({ type: 'client_count', clients: sseClients.size });
+  });
 });
 
 app.post('/api/launch-event', (req, res) => {

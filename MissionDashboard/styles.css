@@ -424,7 +424,13 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 @media(max-width:760px){.hdr-launch{display:none}}
 
 /* ───────────────────── Dashboard launch summary ───────────────────── */
-.launch-summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:6px 0 16px}
+.launch-summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:6px 0 16px}
+.connection-quality.go{border-color:rgba(54,240,160,.35)}
+.connection-quality.marginal{border-color:rgba(255,179,71,.38)}
+.connection-quality.nogo{border-color:rgba(255,74,61,.42)}
+#ds-server-quality.go,#ds-server-go.go{color:var(--green)}
+#ds-server-quality.marginal,#ds-server-go.marginal{color:var(--amber)}
+#ds-server-quality.nogo,#ds-server-go.nogo{color:var(--red)}
 .lc-open-btn{width:100%;margin-top:4px;margin-bottom:12px}
 @media(max-width:760px){.launch-summary-grid{grid-template-columns:1fr 1fr}}
 

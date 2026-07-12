@@ -46,6 +46,8 @@ let authVerificationQueue = Promise.resolve();
 const pendingRemoteCommands = new Map();
 let joinAuthorized = false;
 let joinAuthorizationInFlight = null;
+let serverLink = { state: 'marginal', latency: null, failures: 0, checkedAt: 0 };
+let serverClientCount = 1;
 
 // Launch Console wizard state
 let lcStep = 0;
@@ -63,6 +65,7 @@ async function initBleController() {
   renderLaunch();
   restoreGrantedBle();
   setInterval(checkLaunchLinkHealth, 1000);
+  startServerLinkMonitor();
 }
 
 if (document.readyState === 'loading') {
@@ -550,7 +553,8 @@ function renderLaunch() {
   setText('ds-armed', locked ? 'Locked' : armed ? 'Yes' : 'No');
   setText('ds-countdown', launchCountdownActive ? 'Active' : (status.countdown ? 'Active' : 'Idle'));
   setText('ds-countdown-sub', launchCountdownActive ? 'BLE heartbeat live' : 'No active sequence');
-  setText('ds-clients', status.clients ?? 0);
+  setText('ds-clients', serverClientCount);
+  renderServerLink();
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
   if (dsBadge) dsBadge.className = `go-badge ${!linked ? 'marginal' : armed ? 'nogo' : 'go'}`;
@@ -774,6 +778,44 @@ function isValidCode(code) {
   return /^\d{6}$/.test(code);
 }
 
+function startServerLinkMonitor() {
+  const check = async () => {
+    const started = performance.now();
+    try {
+      const response = await fetch(`/api/health?t=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const latency = Math.round(performance.now() - started);
+      serverLink = {
+        state: latency > 800 ? 'nogo' : latency > 250 ? 'marginal' : 'go',
+        latency, failures: 0, checkedAt: Date.now()
+      };
+    } catch (_) {
+      serverLink.failures++;
+      serverLink = { ...serverLink, state: 'nogo', latency: null, checkedAt: Date.now() };
+    }
+    renderServerLink();
+  };
+  check();
+  setInterval(check, 5000);
+}
+
+function renderServerLink() {
+  const quality = serverLink.state === 'go' ? 'Good' : serverLink.state === 'marginal' ? 'Limited' : 'Poor';
+  const detail = serverLink.latency == null
+    ? 'Server not responding'
+    : `${serverLink.latency} ms response time`;
+  setText('ds-server-quality', quality);
+  setText('ds-server-latency', detail);
+  setText('ds-server-go', serverLink.state === 'nogo' ? 'NO-GO' : serverLink.state === 'go' ? 'GO' : 'HOLD');
+  setText('ds-server-go-sub', serverLink.state === 'nogo' ? 'Connection too slow or unavailable' : serverLink.state === 'go' ? 'Server link within limits' : 'Elevated latency — monitor');
+  ['ds-server-quality', 'ds-server-go'].forEach(id => {
+    const node = el(id);
+    if (node) node.className = `v ${serverLink.state}`;
+  });
+  const card = el('ds-server-quality-card');
+  if (card) card.className = `derived-item connection-quality ${serverLink.state}`;
+}
+
 function formatControllerError(error) {
   const messages = {
     abort: 'Controller safely aborted',
@@ -904,6 +946,7 @@ function startSharedStream() {
     try { message = JSON.parse(event.data); } catch (_) { return; }
     if (message.type === 'shared_state') {
       sharedState = message.state || sharedState;
+      serverClientCount = Number(sharedState.viewers) || serverClientCount;
       if (!bleConnected && sharedState.status) bleStatusData = sharedState.status;
       renderLaunch();
       if (sharedState.ownerActive && !bleConnected && !joinAuthorized && !joinAuthorizationInFlight) {
@@ -911,6 +954,9 @@ function startSharedStream() {
           if (ok) startSharedStream();
         }).finally(() => { joinAuthorizationInFlight = null; });
       }
+    } else if (message.type === 'client_count') {
+      serverClientCount = Math.max(0, Number(message.clients) || 0);
+      renderLaunch();
     } else if (message.type === 'remote_command' && bleConnected && message.ownerId === CLIENT_ID) {
       executeRemoteCommand(message);
     } else if (message.type === 'auth_request' && bleConnected && message.ownerId === CLIENT_ID) {
