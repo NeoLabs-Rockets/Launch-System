@@ -23,6 +23,7 @@ const finderEngine = require('./finder-engine');
 }());
 
 const app = express();
+const SERVER_INSTANCE_ID = crypto.randomUUID();
 const PORT = Math.min(65535, Math.max(1, Number(process.env.PORT) || 3456));
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CACHE_FILE = path.join(DATA_DIR, 'upstream-cache.json');
@@ -53,22 +54,74 @@ const sseClients = new Map();
 const OWNER_TTL_MS = 15000;
 const pendingCommands = new Map();
 const pendingAuth = new Map();
-let sharedLaunch = { ownerId: null, ownerName: '', connected: false, reconnecting: false, status: null, countdown: null, updatedAt: Date.now() };
+let sharedLaunch = { ownerId: null, ownerName: '', connected: false, reconnecting: false, status: null, countdown: null, lastEvent: null, host: null, updatedAt: Date.now() };
+
+const DURABLE_LAUNCH_EVENT_TYPES = new Set(['countdown_start', 'abort', 'ignition']);
+
+function publicLaunchEvent(value) {
+  if (!value || typeof value !== 'object' || !DURABLE_LAUNCH_EVENT_TYPES.has(value.type)) return null;
+  const { clientId, ownerId, ...event } = value;
+  event.eventId = String(event.eventId || '').slice(0, 100);
+  event.at = Number.isFinite(Number(event.at)) ? Number(event.at) : Date.now();
+  return event;
+}
+
+function newerLaunchEvent(current, candidate) {
+  const event = publicLaunchEvent(candidate);
+  if (!event) return current || null;
+  if (!current || event.at >= Number(current.at || 0)) return event;
+  return current;
+}
+
+function ownerLossEvent(reason) {
+  return {
+    type: 'abort',
+    eventId: crypto.randomUUID(),
+    source: 'launch-dashboard',
+    reason,
+    at: Date.now()
+  };
+}
+
+function lastEventAfterOwnerLoss(state, reason) {
+  if (state.countdown?.active || state.status?.armed || state.lastEvent?.type === 'countdown_start') {
+    return ownerLossEvent(reason);
+  }
+  return state.lastEvent?.type === 'abort' || state.lastEvent?.type === 'ignition' ? state.lastEvent : null;
+}
+
+function publicHostState(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    visibility: value.visibility === 'visible' ? 'visible' : 'hidden',
+    wakeLockSupported: value.wakeLockSupported === true,
+    wakeLockActive: value.wakeLockActive === true
+  };
+}
 
 function ownerAlive() {
   return !!sharedLaunch.ownerId && Date.now() - sharedLaunch.updatedAt < OWNER_TTL_MS;
 }
 
 function emitLaunch(payload, targetClientId = null) {
-  const line = `data: ${JSON.stringify({ ...payload, serverAt: Date.now() })}\n\n`;
+  const stamped = { ...payload, serverAt: Date.now(), serverInstanceId: SERVER_INSTANCE_ID };
+  const line = `data: ${JSON.stringify(stamped)}\n\n`;
+  // The public state hides ownerId, so each client must be told explicitly
+  // whether the active lease is its own — otherwise the owner device treats
+  // its own lease as "another device" and locks itself out.
+  const ownerLine = payload.type === 'shared_state' && payload.state?.ownerActive
+    ? `data: ${JSON.stringify({ ...stamped, state: { ...payload.state, youAreOwner: true } })}\n\n`
+    : null;
   for (const [client, meta] of sseClients) {
     if (targetClientId && meta.clientId !== targetClientId) continue;
-    try { client.write(line); } catch (_) { sseClients.delete(client); }
+    const out = ownerLine && meta.clientId === sharedLaunch.ownerId ? ownerLine : line;
+    try { client.write(out); } catch (_) { sseClients.delete(client); }
   }
 }
 
 function publicLaunchState() {
   if (!ownerAlive() && (sharedLaunch.connected || sharedLaunch.ownerId)) {
+    const lastEvent = lastEventAfterOwnerLoss(sharedLaunch, 'BLE owner lease expired');
     sharedLaunch = {
       ...sharedLaunch,
       ownerId: null,
@@ -77,6 +130,8 @@ function publicLaunchState() {
       reconnecting: false,
       status: null,
       countdown: null,
+      lastEvent,
+      host: null,
       updatedAt: Date.now()
     };
   }
@@ -86,7 +141,13 @@ function publicLaunchState() {
         remainingMs: Math.max(0, Number(sharedLaunch.countdown.endsAtServer || 0) - Date.now())
       }
     : sharedLaunch.countdown;
-  return { ...sharedLaunch, countdown, ownerId: undefined, ownerActive: ownerAlive(), viewers: sseClients.size, serverAt: Date.now() };
+  return { ...sharedLaunch, countdown, ownerId: undefined, ownerActive: ownerAlive(), viewers: sseClients.size, serverAt: Date.now(), serverInstanceId: SERVER_INSTANCE_ID };
+}
+
+function publicLaunchStateFor(clientId) {
+  const state = publicLaunchState();
+  if (state.ownerActive && clientId && clientId === sharedLaunch.ownerId) state.youAreOwner = true;
+  return state;
 }
 
 // Keep the in-memory caches bounded so a long-running controller never leaks
@@ -185,25 +246,35 @@ app.get('/api/auth/status', (req, res) => res.json({ authenticated: !!sessionFor
 app.post('/api/auth/login', async (req, res) => {
   if (!ownerAlive()) return res.json({ ok: true, codeRequired: false });
   const authKey = req.ip || req.socket.remoteAddress || 'unknown';
-  const failure = authFailures.get(authKey);
-  if (failure && failure.until > Date.now() && failure.count >= 5) {
-    return res.status(429).json({ error: 'too_many_attempts', retryAfterMs: failure.until - Date.now() });
-  }
   const code = String(req.body?.code || '');
   if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'invalid_launch_code_format' });
+  const now = Date.now();
+  let failure = authFailures.get(authKey);
+  if (!failure || failure.until <= now) failure = { count: 0, pending: 0, until: now + 60000 };
+  if (failure.count + failure.pending >= 5) {
+    const retryAfterMs = failure.count >= 5 ? failure.until - now : 1000;
+    return res.status(429).json({ error: 'too_many_attempts', retryAfterMs });
+  }
+  // Reserve the attempt before waiting for the ESP32. Without this, a burst of
+  // concurrent invalid codes all observes the same old count and bypasses the
+  // limit when their replies arrive together.
+  failure.pending++;
+  authFailures.set(authKey, failure);
   const requestId = crypto.randomUUID();
   const valid = await new Promise(resolve => {
     const timer = setTimeout(() => { pendingAuth.delete(requestId); resolve(false); }, 6000);
     pendingAuth.set(requestId, result => { clearTimeout(timer); pendingAuth.delete(requestId); resolve(result); });
     emitLaunch({ type: 'auth_request', requestId, code, ownerId: sharedLaunch.ownerId }, sharedLaunch.ownerId);
   });
+  failure.pending = Math.max(0, failure.pending - 1);
   if (!valid) {
-    const current = failure && failure.until > Date.now() ? failure : { count: 0, until: Date.now() + 60000 };
-    current.count++;
-    authFailures.set(authKey, current);
-    return res.status(401).json({ error: 'invalid_launch_code', attemptsLeft: Math.max(0, 5 - current.count) });
+    failure.count++;
+    authFailures.set(authKey, failure);
+    return res.status(401).json({ error: 'invalid_launch_code', attemptsLeft: Math.max(0, 5 - failure.count - failure.pending) });
   }
-  authFailures.delete(authKey);
+  failure.count = 0;
+  if (failure.pending === 0) authFailures.delete(authKey);
+  else authFailures.set(authKey, failure);
   const token = crypto.randomBytes(32).toString('base64url');
   sessions.set(token, { id: crypto.randomUUID(), ownerId: sharedLaunch.ownerId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
@@ -222,26 +293,36 @@ app.post('/api/auth/owner', (req, res) => {
   if (ownerAlive() && sharedLaunch.ownerId !== clientId) {
     return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
   }
+  const renewingOwnLease = ownerAlive() && sharedLaunch.ownerId === clientId;
   sharedLaunch = {
     ...sharedLaunch,
     ownerId: clientId,
     ownerName: String(req.body?.deviceName || sharedLaunch.ownerName || 'NeoLabs controller'),
     connected: true,
+    reconnecting: false,
     status: req.body?.status || sharedLaunch.status,
-    countdown: { active: false, endsAtServer: null, left: 0 },
+    // A reconnect from the same dashboard renews its lease; it must not look
+    // like an abort to camera/remote clients while the local countdown resumes.
+    countdown: renewingOwnLease ? sharedLaunch.countdown : { active: false, endsAtServer: null, left: 0 },
+    lastEvent: renewingOwnLease ? sharedLaunch.lastEvent : null,
+    host: publicHostState(req.body?.host) || (renewingOwnLease ? sharedLaunch.host : null),
     updatedAt: Date.now()
   };
   const token = crypto.randomBytes(32).toString('base64url');
   sessions.set(token, { id: crypto.randomUUID(), ownerId: clientId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
   emitLaunch({ type: 'shared_state', state: publicLaunchState() });
-  res.json({ ok: true, state: publicLaunchState() });
+  // The response can arrive after the personalized SSE update. Return the same
+  // ownership marker so the caller cannot overwrite true with an anonymous
+  // public snapshot and briefly lock itself out.
+  res.json({ ok: true, state: publicLaunchStateFor(clientId) });
 });
 // Explicit lease release (fetch keepalive or sendBeacon on pagehide) so other
 // devices can take over immediately instead of waiting out the owner TTL.
 app.post('/api/auth/owner/release', (req, res) => {
   const clientId = String(req.body?.clientId || '');
   if (!clientId || sharedLaunch.ownerId !== clientId) return res.json({ ok: true, ignored: true });
+  const lastEvent = lastEventAfterOwnerLoss(sharedLaunch, 'BLE owner released the session');
   sharedLaunch = {
     ...sharedLaunch,
     ownerId: null,
@@ -250,6 +331,8 @@ app.post('/api/auth/owner/release', (req, res) => {
     reconnecting: false,
     status: null,
     countdown: null,
+    lastEvent,
+    host: null,
     updatedAt: Date.now()
   };
   emitLaunch({ type: 'shared_state', state: publicLaunchState() });
@@ -503,7 +586,7 @@ async function fetchOverpassWithRetry(query) {
 }
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, cache_entries: aircraftCache.size, osm_cache_entries: osmCache.size, now: new Date().toISOString() });
+  res.json({ ok: true, instanceId: SERVER_INSTANCE_ID, cache_entries: aircraftCache.size, osm_cache_entries: osmCache.size, now: new Date().toISOString() });
 });
 
 app.get('/api/osm-safety', async (req, res) => {
@@ -575,7 +658,8 @@ app.get('/api/launch-stream', (req, res) => {
   res.flushHeaders();
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
   sseClients.set(res, { clientId });
-  res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
+  const initialState = publicLaunchStateFor(clientId);
+  res.write(`data: ${JSON.stringify({ type: 'shared_state', state: initialState, serverAt: Date.now(), serverInstanceId: SERVER_INSTANCE_ID })}\n\n`);
   emitLaunch({ type: 'client_count', clients: sseClients.size });
   req.on('close', () => {
     sseClients.delete(res);
@@ -644,6 +728,10 @@ app.post('/api/launch-event', (req, res) => {
     // its lease (heartbeats keep arriving with reconnecting: true) so a brief
     // BLE blip doesn't bounce ownership between devices.
     const keepLease = !payload.connected && payload.reconnecting === true && sharedLaunch.ownerId === clientId;
+    const losingOwner = !payload.connected && !keepLease && sharedLaunch.ownerId === clientId;
+    const reportedLastEvent = losingOwner
+      ? lastEventAfterOwnerLoss(sharedLaunch, 'BLE controller link lost')
+      : newerLaunchEvent(sharedLaunch.lastEvent, payload.lastEvent);
     sharedLaunch = {
       ...sharedLaunch,
       ownerId: payload.connected || keepLease ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
@@ -659,6 +747,8 @@ app.post('/api/launch-event', (req, res) => {
             endsAtServer: Date.now() + Math.max(0, Number(payload.countdown.leftMs) || Number(payload.countdown.left) * 1000 || Math.max(0, Number(payload.countdown.endsAt) - Date.now()))
           }
         : (payload.countdown ?? sharedLaunch.countdown),
+      lastEvent: reportedLastEvent,
+      host: payload.connected || keepLease ? (publicHostState(payload.host) || sharedLaunch.host) : null,
       updatedAt: Date.now()
     };
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
@@ -685,18 +775,35 @@ app.post('/api/launch-event', (req, res) => {
       sharedLaunch.countdown = { active: false, endsAt: null, left: 0 };
     }
     sharedLaunch.updatedAt = Date.now();
-    emitLaunch(sharedLaunch.countdown?.active
+    const outgoing = sharedLaunch.countdown?.active
       ? { ...payload, remainingMs: Math.max(0, sharedLaunch.countdown.endsAtServer - Date.now()) }
-      : payload);
+      : payload;
+    if (DURABLE_LAUNCH_EVENT_TYPES.has(payload.type)) {
+      sharedLaunch.lastEvent = newerLaunchEvent(sharedLaunch.lastEvent, outgoing);
+    }
+    emitLaunch(outgoing);
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   }
   res.json({ ok: true, clients: sseClients.size });
 });
 
-app.get('/api/launch-state', (req, res) => res.json(publicLaunchState()));
+app.get('/api/launch-state', (req, res) => {
+  const clientId = String(req.query.clientId || '');
+  res.json(publicLaunchStateFor(clientId));
+});
 
 app.post('/api/launch-command', (req, res) => {
   if (!ownerAlive()) return res.status(503).json({ error: 'no_ble_owner' });
+  // A command from the owner itself means its BLE link is down — routing it
+  // through the relay would just come straight back to the same browser.
+  const requesterId = String(req.body?.clientId || '');
+  if (requesterId && requesterId === sharedLaunch.ownerId) {
+    return res.status(409).json({ error: 'ble_owner_is_this_device' });
+  }
+  // Fail fast when the owner's dashboard has no live stream (closed tab,
+  // mid-reload) instead of letting the caller wait out an 8 s timeout.
+  const ownerOnline = [...sseClients.values()].some(meta => meta.clientId === sharedLaunch.ownerId);
+  if (!ownerOnline) return res.status(503).json({ error: 'owner_unreachable' });
   const allowed = new Set(['arm', 'disarm', 'countdown_start', 'abort']);
   const command = String(req.body?.command || '');
   if (!allowed.has(command)) return res.status(400).json({ error: 'invalid_command' });
@@ -752,10 +859,20 @@ server.on('error', err => {
   console.error('[server error]', err);
 });
 
+let shutdownStarted = false;
 function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   console.log(`[shutdown] ${signal} received`);
   if (cachePersistTimer) clearTimeout(cachePersistTimer);
   persistCaches();
+  // Long-lived SSE responses otherwise keep server.close() waiting until the
+  // forced-exit timeout. Ending them explicitly makes browsers reconnect to a
+  // replacement instance immediately during deploys and container restarts.
+  for (const client of sseClients.keys()) {
+    try { client.end(); } catch (_) {}
+  }
+  sseClients.clear();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10000).unref();
 }

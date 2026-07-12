@@ -270,7 +270,6 @@
             'BLE write'
           );
           this._writeFailures = 0;
-          this.lastActivityAt = Date.now();
         } catch (error) {
           this._writeFailures++;
           const gattUp = !!this.device?.gatt?.connected;
@@ -291,9 +290,12 @@
     }
 
     _onNotify(event) {
-      this.lastActivityAt = Date.now();
       let parsed;
       try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      // Only a valid controller response proves end-to-end liveness. A host
+      // write completing (or malformed notification bytes arriving) must not
+      // keep a half-dead status channel alive forever.
+      this.lastActivityAt = Date.now();
       this._emit('status', parsed);
     }
 

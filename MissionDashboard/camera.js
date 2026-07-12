@@ -36,6 +36,7 @@
   let lastCountdownSpoken = null;
   let speechPrimed = false;
   let showTelemetry = true;
+  const seenLaunchEventIds = new Set();
 
   window.CameraApp = { onShow, onHide };
   // Same-document hooks so the BLE controller can push events without relying on
@@ -110,6 +111,12 @@
 
   function applyLaunchEvent(data) {
     if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
+    const eventId = String(data.eventId || '');
+    if (eventId && seenLaunchEventIds.has(eventId)) return;
+    if (eventId) {
+      seenLaunchEventIds.add(eventId);
+      if (seenLaunchEventIds.size > 100) seenLaunchEventIds.delete(seenLaunchEventIds.values().next().value);
+    }
     if (data.type === 'countdown_start') {
       lastCountdownSpoken = null;
       const remainingMs = syncedRemainingMs(data);
@@ -140,6 +147,12 @@
       ignitionAt = 0;
       lastCountdownSpoken = null;
       setText('cam-count-state', 'Aborted');
+    } else if (data.type === 'sync_lost') {
+      externalCountdownActive = false;
+      externalCountdownTotalMs = 0;
+      ignitionAt = 0;
+      lastCountdownSpoken = null;
+      setText('cam-count-state', 'Sync lost — outcome pending');
     }
   }
 

@@ -41,6 +41,8 @@
       this._listeners = new Map();
       this._pending = new Map();
       this._started = false;
+      this.streamInstanceId = null;
+      this.healthInstanceId = null;
     }
 
     on(event, fn) {
@@ -79,6 +81,7 @@
         this._emit('stream', { state: 'open' });
       };
       stream.onerror = () => {
+        this.streamInstanceId = null;
         this._emit('stream', { state: 'degraded' });
       };
       stream.onmessage = event => {
@@ -102,6 +105,7 @@
     }
 
     _route(message) {
+      if (message.serverInstanceId) this.streamInstanceId = String(message.serverInstanceId);
       switch (message.type) {
         case 'heartbeat':
           break; // stream liveness only
@@ -169,16 +173,18 @@
 
     /* ── Messaging ───────────────────────────────────────────────────────── */
 
+    // Resolves to the Response (or null on network failure) so callers can
+    // react to rejections like a 409 owner conflict instead of missing them.
     relay(message) {
       return fetch('/api/launch-event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...message, clientId: this.clientId })
-      }).catch(() => {});
+      }).catch(() => null);
     }
 
     async fetchState() {
-      const response = await fetch('/api/launch-state');
+      const response = await fetch(`/api/launch-state?clientId=${encodeURIComponent(this.clientId)}`);
       if (!response.ok) throw new Error(`launch-state HTTP ${response.status}`);
       return response.json();
     }
@@ -200,7 +206,7 @@
         response = await fetch('/api/launch-command', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ commandId, command, args })
+          body: JSON.stringify({ commandId, command, args, clientId: this.clientId })
         });
       } catch (_) {
         this._dropPending(commandId);
@@ -247,12 +253,16 @@
             signal: AbortSignal.timeout(2500)
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const health = await response.json();
+          this.healthInstanceId = String(health.instanceId || '');
           const latency = Math.round(performance.now() - started);
+          const instanceMismatch = !!this.streamInstanceId && !!this.healthInstanceId && this.streamInstanceId !== this.healthInstanceId;
           this.serverLink = {
-            state: latency > 800 ? 'nogo' : latency > 250 ? 'marginal' : 'go',
+            state: instanceMismatch || latency > 800 ? 'nogo' : latency > 250 ? 'marginal' : 'go',
             latency,
             failures: 0,
-            checkedAt: Date.now()
+            checkedAt: Date.now(),
+            instanceMismatch
           };
         } catch (_) {
           this.serverLink = {
@@ -264,7 +274,9 @@
           };
         }
         const quality = this.serverLink.state === 'go' ? 'Good' : this.serverLink.state === 'marginal' ? 'Limited' : 'Poor';
-        const detail = this.serverLink.latency == null
+        const detail = this.serverLink.instanceMismatch
+          ? 'Multiple unsynchronized dashboard server instances detected'
+          : this.serverLink.latency == null
           ? 'Server not responding'
           : `${this.serverLink.latency} ms response time`;
         this._emit('serverlink', { ...this.serverLink, quality, detail });
