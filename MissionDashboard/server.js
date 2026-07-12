@@ -155,7 +155,9 @@ function sessionFor(req) {
 
 function requireAuth(req, res, next) {
   if (!ownerAlive()) return next();
-  if (['/health', '/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-event'].includes(req.path)) return next();
+  // Live launch state is read-only and must remain available to camera devices.
+  // Mutating command and recording routes below still require authorization.
+  if (['/health', '/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-stream', '/launch-event'].includes(req.path)) return next();
   const session = sessionFor(req);
   if (!session) return res.status(401).json({ error: 'launch_code_required' });
   req.launchSession = session;
@@ -215,7 +217,6 @@ app.post('/api/auth/owner', (req, res) => {
   if (ownerAlive() && sharedLaunch.ownerId !== clientId) {
     return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
   }
-  const ownerWasAlive = ownerAlive();
   sharedLaunch = {
     ...sharedLaunch,
     ownerId: clientId,
@@ -229,20 +230,8 @@ app.post('/api/auth/owner', (req, res) => {
   sessions.set(token, { id: crypto.randomUUID(), ownerId: clientId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
   emitLaunch({ type: 'shared_state', state: publicLaunchState() });
-  if (!ownerWasAlive) evictUnauthorizedViewers(clientId);
   res.json({ ok: true, state: publicLaunchState() });
 });
-
-function evictUnauthorizedViewers(ownerId) {
-  setTimeout(() => {
-    for (const [client, meta] of sseClients) {
-      if (!meta.authorized && meta.clientId !== ownerId) {
-        try { client.end(); } catch (_) {}
-        sseClients.delete(client);
-      }
-    }
-  }, 100);
-}
 app.use('/api', requireAuth);
 
 // ── Resilient camera recording cache ──────────────────────────────────────
@@ -562,7 +551,7 @@ app.get('/api/launch-stream', (req, res) => {
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
   const clientId = String(req.query.clientId || '');
   if (!clientId) return res.end();
-  sseClients.set(res, { clientId, authorized: !!sessionFor(req) });
+  sseClients.set(res, { clientId });
   res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
   emitLaunch({ type: 'client_count', clients: sseClients.size });
   req.on('close', () => {
@@ -628,7 +617,6 @@ app.post('/api/launch-event', (req, res) => {
     if (payload.connected && ownerAlive() && sharedLaunch.ownerId !== clientId) {
       return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
     }
-    const ownerWasAlive = ownerAlive();
     sharedLaunch = {
       ...sharedLaunch,
       ownerId: payload.connected ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
@@ -646,7 +634,6 @@ app.post('/api/launch-event', (req, res) => {
       updatedAt: Date.now()
     };
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
-    if (!ownerWasAlive && payload.connected) evictUnauthorizedViewers(clientId);
   } else if (payload.type === 'command_result') {
     if (!fromOwner) return res.status(403).json({ error: 'owner_event_required' });
     pendingCommands.delete(String(payload.commandId || ''));

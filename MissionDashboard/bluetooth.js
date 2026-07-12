@@ -51,7 +51,6 @@ let authStatusWaiter = null;
 let authVerificationQueue = Promise.resolve();
 const pendingRemoteCommands = new Map();
 let joinAuthorized = false;
-let joinAuthorizationInFlight = null;
 let serverLink = { state: 'marginal', latency: null, failures: 0, checkedAt: 0 };
 let serverClientCount = 1;
 
@@ -62,7 +61,6 @@ let lcOpen = false;
 async function initBleController() {
   if (bleInitDone) return;
   bleInitDone = true;
-  if (!await ensureLaunchAuthorization()) return;
   resolveAuthReady(true);
   startSharedStream();
   restoreActiveLaunch();
@@ -506,7 +504,8 @@ function applyBleStatus(s) {
     attemptsLeft: s.left,
     clients: s.n || 0,
     uptime: s.u || 0,
-    error: s.e || ''
+    error: s.e || '',
+    firmwareVersion: s.v || ''
   };
   if (authStatusWaiter && (bleStatusData.error === 'auth_ok' || bleStatusData.error === 'auth_failed')) {
     authStatusWaiter(bleStatusData.error === 'auth_ok');
@@ -650,7 +649,9 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked) {
     return;
   }
   if (locked) { note.textContent = 'Controller locked after too many wrong codes — reboot the ESP32 to reset.'; return; }
-  if (lcStep === 0) note.textContent = linked ? 'Linked. Continue to the checklist.' : 'Pair the NeoLabs controller to begin.';
+  if (lcStep === 0) note.textContent = linked
+    ? `Linked${currentStatus().firmwareVersion ? ` · firmware ${currentStatus().firmwareVersion}` : ''}. Continue to the checklist.`
+    : 'Pair the NeoLabs controller to begin.';
   else if (lcStep === 1) note.textContent = 'Confirm every checklist item to enable arming.';
   else if (lcStep === 2) note.textContent = armed ? 'Armed. Continue to the launch step.' : 'Review launch conditions, then arm.';
   else note.textContent = 'Hold for a clear range and airspace, then start the countdown. Abort is always available.';
@@ -998,11 +999,6 @@ function startSharedStream() {
       }
       publishCameraSharedState();
       renderLaunch();
-      if (sharedState.ownerActive && !bleConnected && !joinAuthorized && !joinAuthorizationInFlight) {
-        joinAuthorizationInFlight = ensureLaunchAuthorization().then(ok => {
-          if (ok) startSharedStream();
-        }).finally(() => { joinAuthorizationInFlight = null; });
-      }
     } else if (message.type === 'client_count') {
       serverClientCount = Math.max(0, Number(message.clients) || 0);
       renderLaunch();
@@ -1156,7 +1152,7 @@ function stopOwnerHeartbeat() {
   ownerHeartbeatTimer = null;
 }
 
-async function sendRemoteCommand(command, args = {}) {
+async function sendRemoteCommand(command, args = {}, authorizedRetry = false) {
   const commandId = makeSessionId();
   setLaunchState('Waiting for BLE controller…', 'warn');
   const completion = new Promise((resolve, reject) => {
@@ -1170,6 +1166,15 @@ async function sendRemoteCommand(command, args = {}) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commandId, command, args })
   });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && !authorizedRetry) {
+    const pending = pendingRemoteCommands.get(commandId);
+    if (pending) clearTimeout(pending.timer);
+    pendingRemoteCommands.delete(commandId);
+    const authorized = await ensureLaunchAuthorization();
+    if (!authorized) throw new Error('Launch authorization is required to control the BLE owner');
+    startSharedStream();
+    return sendRemoteCommand(command, args, true);
+  }
   if (!response.ok) {
     const pending = pendingRemoteCommands.get(commandId);
     if (pending) clearTimeout(pending.timer);

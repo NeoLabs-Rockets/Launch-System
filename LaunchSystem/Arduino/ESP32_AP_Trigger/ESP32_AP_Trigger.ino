@@ -9,16 +9,16 @@
 #define MAX_ATTEMPTS 10
 #define TRIGGER_MS 2000UL
 #define COUNTDOWN_TIMEOUT_MS 3000UL
-#define LINK_TIMEOUT_MS 10000UL
 
 static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
+static const char FIRMWARE_VERSION[] = "2.2.0";
 
 NimBLECharacteristic* statusChar = nullptr;
 bool armed = false, firing = false, countdown = false, locked = false;
-unsigned long triggerStarted = 0, lastHeartbeat = 0, lastOwnerActivity = 0, lastNotify = 0;
+unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0;
 int attempts = 0, connectedCount = 0;
 String ownerSid, lastError;
 
@@ -61,9 +61,9 @@ void publishStatus() {
   if (!statusChar) return;
   char data[190];
   snprintf(data, sizeof(data),
-    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\"}",
+    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
     armed, firing, countdown, locked, locked ? 0 : MAX_ATTEMPTS - attempts,
-    connectedCount, millis(), lastError.c_str());
+    connectedCount, millis(), lastError.c_str(), FIRMWARE_VERSION);
   statusChar->setValue((uint8_t*)data, strlen(data));
   statusChar->notify();
   lastNotify = millis();
@@ -76,6 +76,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     if (connectedCount > 0) connectedCount--;
+    if (armed || countdown) safeStop("owner_lost");
     NimBLEDevice::getAdvertising()->start();
     publishStatus();
   }
@@ -88,7 +89,6 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
     lastError = "";
 
     if (cmd == "status") {
-      if (ownerSid.length() && sid == ownerSid) lastOwnerActivity = millis();
       publishStatus();
       return;
     }
@@ -106,14 +106,12 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       ownerSid = sid;
       armed = true;
       countdown = false;
-      lastOwnerActivity = millis();
       motorPulse(100);
       publishStatus();
       return;
     }
 
     if (!ownerSid.length() || sid != ownerSid) { lastError = "not_owner"; publishStatus(); return; }
-    lastOwnerActivity = millis();
     if (cmd == "countdown_start") {
       if (!armed || firing) lastError = armed ? "trigger_active" : "not_armed";
       else { countdown = true; lastHeartbeat = millis(); }
@@ -171,10 +169,6 @@ void loop() {
   }
   if (countdown && now - lastHeartbeat > COUNTDOWN_TIMEOUT_MS) {
     safeStop("heartbeat_lost");
-    publishStatus();
-  }
-  if (armed && ownerSid.length() && now - lastOwnerActivity > LINK_TIMEOUT_MS) {
-    safeStop("owner_lost");
     publishStatus();
   }
   if (STATUS_LED >= 0) digitalWrite(STATUS_LED, firing ? ((now / 100) % 2) : armed);

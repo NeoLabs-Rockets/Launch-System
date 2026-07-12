@@ -78,7 +78,7 @@
     ['cam-title', 'cam-site', 'cam-mission'].forEach(id => {
       document.getElementById(id).addEventListener('input', drawIdleFrame);
     });
-    ['cam-quality', 'cam-facing', 'cam-audio', 'cam-fps'].forEach(id => {
+    ['cam-quality', 'cam-facing', 'cam-audio', 'cam-fps', 'cam-lens'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => {
         if (sourceStream) openCamera();
       });
@@ -184,13 +184,12 @@
     stopStreams();
     const q = quality();
     const facingMode = document.getElementById('cam-facing').value;
+    const lens = Number(document.getElementById('cam-lens')?.value || 1);
     const wantsAudio = document.getElementById('cam-audio').value === 'on';
     setStatus('Opening camera', 'Requesting device permissions.', 'warn');
     try {
-      sourceStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode }, width: { ideal: q.width }, height: { ideal: q.height }, frameRate: { ideal: q.fps } },
-        audio: false
-      });
+      const selectedVideo = await openVideoStream(q, facingMode, lens);
+      sourceStream = selectedVideo.stream;
       if (wantsAudio) {
         try {
           audioStream = await navigator.mediaDevices.getUserMedia({
@@ -211,7 +210,7 @@
       resizeCanvas();
       startDrawLoop();
       document.getElementById('cam-record').disabled = false;
-      setStatus('Camera ready', 'Preview includes the recorded overlay.', 'ok');
+      setStatus('Camera ready', selectedVideo.detail || 'Preview includes the recorded overlay.', selectedVideo.applied === false ? 'warn' : 'ok');
     } catch (err) {
       setStatus('Camera unavailable', 'Allow camera permission or try another browser/device.', 'bad');
       setText('cam-audio-state', 'Unavailable');
@@ -566,6 +565,55 @@
         ? 'Main download started. Green-screen copy skipped and the completed backend cache was cleared.'
         : 'Main download started locally. Green-screen copy skipped; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
     }
+  }
+
+  async function openVideoStream(q, facingMode, lens) {
+    const videoConstraints = {
+      facingMode: { ideal: facingMode },
+      width: { ideal: q.width },
+      height: { ideal: q.height },
+      frameRate: { ideal: q.fps },
+      zoom: { ideal: lens }
+    };
+    let stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
+    const track = stream.getVideoTracks()[0];
+    if (!track) return { stream, applied: false, detail: 'Camera opened, but no video track was reported.' };
+
+    const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : {};
+    if (capabilities.zoom && lens >= capabilities.zoom.min && lens <= capabilities.zoom.max) {
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: lens }] });
+        return { stream, applied: true, detail: `${lens}× lens active. Preview includes the recorded overlay.` };
+      } catch (_) {}
+    }
+
+    // Mobile browsers often expose the ultrawide camera as a separate device
+    // instead of a numeric zoom capability. Labels become available after the
+    // first permission grant above, so switch tracks without interrupting UI.
+    if (lens === 0.7 && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const ultrawide = devices.find(device => device.kind === 'videoinput' && /ultra|wide.?angle|0[.,][5-8]\s*[xÃ—]?/i.test(device.label));
+        const currentId = track.getSettings?.().deviceId;
+        if (ultrawide?.deviceId && ultrawide.deviceId !== currentId) {
+          const replacement = await navigator.mediaDevices.getUserMedia({
+            video: { ...videoConstraints, facingMode: undefined, deviceId: { exact: ultrawide.deviceId } },
+            audio: false
+          });
+          stream.getTracks().forEach(oldTrack => oldTrack.stop());
+          stream = replacement;
+          return { stream, applied: true, detail: '0.7× ultrawide lens active. Preview includes the recorded overlay.' };
+        }
+      } catch (_) {}
+    }
+
+    return {
+      stream,
+      applied: lens === 1,
+      detail: lens === 0.7
+        ? 'This browser did not expose an ultrawide lens; using the standard camera.'
+        : '1× standard lens active. Preview includes the recorded overlay.'
+    };
   }
 
   function syncedRemainingMs(data) {

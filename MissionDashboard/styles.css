@@ -502,3 +502,95 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
   .fx-reveal{opacity:1;transform:none}
   html{scroll-behavior:auto}
 }
+
+/* Mobile layout and touch ergonomics */
+@media(max-width:760px){
+  html{-webkit-text-size-adjust:100%}
+  body{min-width:0}
+  header{position:sticky;display:grid;grid-template-columns:1fr auto;gap:10px 12px;
+    padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left))}
+  .brand{min-width:0;gap:9px}
+  .hole{width:30px;height:30px}
+  .wm{font-size:.9em;letter-spacing:.32em}
+  .tag{font-size:.5em;letter-spacing:.18em;white-space:nowrap}
+  .hdr-right{display:contents}
+  .top-nav{grid-column:1/-1;grid-row:2;display:grid;grid-template-columns:repeat(3,1fr);
+    width:100%;gap:6px;overflow:visible}
+  .top-nav a{display:flex;align-items:center;justify-content:center;min-height:42px;padding:7px 5px;
+    font-size:.68em;letter-spacing:.035em;text-align:center;white-space:normal}
+  .hdr-dot,.hdr-loc,#hdr-clock{display:none}
+  .settings-btn{grid-column:2;grid-row:1;min-width:44px;min-height:44px;padding:8px;font-size:1.15em}
+
+  main{width:100%;padding:18px max(12px,env(safe-area-inset-right))
+    calc(34px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+  .card{padding:16px;border-radius:12px}
+  .card:hover{transform:none}
+  .mission-console{padding:14px;margin-top:0;margin-bottom:16px}
+  .mission-console-head{margin-bottom:14px}
+  .mission-console h1{font-size:clamp(1.65em,8vw,2em);line-height:1.08}
+  .mission-console p{font-size:.84em}
+  #launch-summary-card{padding:14px}
+  #launch-summary-card .card-head{flex-direction:row;align-items:center}
+  #launch-summary-card .go-badge{width:70px;height:70px}
+  .rocket-badge{padding:12px;margin-bottom:16px;gap:7px}
+  .rb-name{width:100%}
+  .rb-edit{margin-left:0;width:100%;padding-top:5px}
+  #status-card{gap:20px;padding:18px;margin-bottom:16px}
+  #status-card>.go-badge{justify-self:center}
+  .factors{grid-template-columns:1fr;width:100%}
+  .factor{min-height:44px;padding:10px 12px}
+  .derived-grid{grid-template-columns:1fr 1fr}
+  .derived-item{padding:12px;min-width:0}
+  .derived-item .v{overflow-wrap:anywhere}
+  .grid-2,.grid-4{gap:12px;margin-bottom:12px}
+  .wx-temp{font-size:2.5em}
+  .wind-layout{justify-content:space-around;gap:12px}
+  #compass-svg{width:112px;height:112px}
+
+  #aircraft-card{overflow:hidden}
+  #ac-table-wrap,.finder-results-card>div:last-child{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:620px}
+  th,td{padding-left:8px;padding-right:8px;white-space:nowrap}
+  .empty-state{padding:22px 12px}
+
+  .finder-map-wrap,#finder-map{min-height:58vh;min-height:58svh}
+  .finder-controls{order:2}
+  .finder-map-wrap{order:1}
+  .finder-legend{right:8px;bottom:8px;left:8px;gap:8px;padding:7px 8px}
+  .camera-stage{min-height:220px}
+  .cam-link-actions,.launch-buttons{grid-template-columns:1fr}
+
+  .sp-field input,.sp-field select,.sp-field textarea{font-size:16px;min-height:44px}
+  .sp-secondary,.sp-save,#aircraft-refresh{min-height:44px}
+  .sp-save{letter-spacing:.12em}
+  #settings-panel{width:100%;height:100dvh;border-left:0}
+  .sp-hd{padding-top:max(14px,env(safe-area-inset-top))}
+  .sp-close{display:flex;align-items:center;justify-content:center;min-width:44px;min-height:44px}
+  .sp-body{padding:16px max(14px,env(safe-area-inset-right))
+    calc(20px + env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left))}
+
+  .lc-overlay{align-items:flex-end;padding:0}
+  .lc-dialog{width:100%;max-height:94vh;max-height:94dvh;border-radius:16px 16px 0 0;
+    padding-bottom:env(safe-area-inset-bottom)}
+  .lc-head,.lc-body,.lc-foot{padding-left:16px;padding-right:16px}
+  .lc-head{gap:10px;padding-top:16px;padding-bottom:14px}
+  .lc-head .go-badge{width:54px;height:54px}
+  .lc-steps{padding:14px 16px 2px;gap:2px}
+  .lc-pip span{font-size:.52em;letter-spacing:.05em}
+  .lc-actions,.lc-metrics{grid-template-columns:1fr}
+  .lc-foot{align-items:stretch;flex-direction:column}
+}
+
+@media(max-width:430px){
+  .tag{display:none}
+  .top-nav a{font-size:.63em}
+  .launch-summary-grid,.derived-grid,.wx-grid{grid-template-columns:1fr}
+  .wind-layout{align-items:center;flex-direction:column}
+  .wind-stats{display:grid;grid-template-columns:repeat(3,1fr);width:100%;text-align:center}
+  .wind-stat .v{font-size:1.12em}
+  .lf-toggle-grid{grid-template-columns:1fr}
+  .finder-actions{grid-template-columns:1fr}
+  .ac-header>div:last-child{width:100%;justify-content:space-between!important}
+  .lc-pip span{display:none}
+  .lc-pip b{width:36px;height:36px}
+}
