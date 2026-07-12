@@ -506,18 +506,13 @@
           <label><input type="checkbox" class="ble-check"> Mission control checked: aircraft, weather, launch location</label>
           <label><input type="checkbox" class="ble-check"> Power lines, roads, buildings, and bystanders outside safety radius</label>
           <label><input type="checkbox" class="ble-check"> Rocket secured, igniter connected, abort word understood</label>
+          <label><input type="checkbox" class="ble-check"> Water deluge active</label>
         </div>
       </section>
 
       <section class="lc-panel" data-panel="2">
         <h3>Arm the controller</h3>
-        <p>Enter the 6-digit arming passcode. Repeated wrong codes lock the controller until reboot.</p>
-        <div class="sp-row">
-          <div class="sp-field">
-            <label for="ble-code">Arming code</label>
-            <input id="ble-code" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
-          </div>
-        </div>
+        <p>The controller can be armed after the shared safety checklist is complete.</p>
         <div class="lc-actions">
           <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
           <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>

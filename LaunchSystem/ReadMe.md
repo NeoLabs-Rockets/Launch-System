@@ -1,24 +1,23 @@
 ﻿# NeoLabs Rockets â€” ESP32 Mission Control
 
-WiFi-controlled trigger/relay switch built on an ESP32. The board runs as its own
-WiFi Access Point and serves a NeoLabs-branded web UI with an **arm â†’ launch**
-workflow, a 10-second voice countdown, and a REST API. Designed to run off a 9V
-battery for portable use.
+BLE-controlled trigger/relay switch built on an ESP32. The board exposes only a
+Bluetooth Low Energy launch service; the Mission Dashboard provides the shared
+**arm â†’ launch** workflow. Designed to run off a portable power supply.
 
 > Firmware: [`Arduino/ESP32_AP_Trigger/ESP32_AP_Trigger.ino`](Arduino/ESP32_AP_Trigger/ESP32_AP_Trigger.ino)
 >
 > Web Bluetooth requires a Chromium-family browser such as Chrome or Edge on
 > localhost/HTTPS. Firefox and Safari do not currently support this control path.
 
-The AP trigger sketch serves WiFi and BLE at the same time. Use this single
-hybrid controller build, then choose Bluetooth or WiFi AP in the Mission
-Dashboard.
+The controller intentionally starts no WiFi access point and serves no embedded
+web UI. One authorized dashboard owns BLE while other dashboards synchronize
+through the Mission Dashboard server.
 
 ## Arduino compile settings
 
 Install the **NimBLE-Arduino** library from the Arduino Library Manager before
 compiling. The sketch uses NimBLE instead of the default ESP32 BLE stack because
-it is much smaller and keeps the hybrid WiFi+BLE build practical.
+it is smaller and well suited to the BLE-only controller.
 
 Recommended Arduino IDE board settings:
 
@@ -28,19 +27,17 @@ Recommended Arduino IDE board settings:
 | Partition Scheme | Default works; Huge APP (3MB No OTA) gives more headroom |
 | Core Debug Level | None |
 
-The current hybrid sketch compiles on the default ESP32 Dev Module partition
+The current BLE-only sketch compiles on the default ESP32 Dev Module partition
 with NimBLE-Arduino installed. If future features push it over the limit, change
 **Tools -> Partition Scheme** to a larger APP partition such as
 **Huge APP (3MB No OTA)**.
 
 ## Features
 
-- **Open WiFi Access Point** â€” no router and no WiFi password; the ESP32 hosts
-  its own network. Security is handled by the arming password instead.
-- **Two-step arming** â€” page 1 is a pre-flight safety **checklist** (every item
-  must be acknowledged), page 2 is the **arming code**.
-- **Single global password** â€” one 6-digit code (default `123456`) is required to
-  arm, both in the UI and on the `/api/arm` endpoint. Disarming never needs it.
+- **BLE only** â€” no ESP32 WiFi access point, captive portal, embedded UI, or REST API.
+- **Checklist-gated arming** â€” every safety item must be acknowledged before arming.
+- **Join authorization** â€” the code exists only in ESP32 firmware. The first BLE-owning
+  dashboard needs no code; additional dashboards are verified by the ESP32 through the owner.
 - **Lockout** â€” after **10** wrong codes the system locks out until reboot
   (counter is kept in RAM only, so a power cycle clears it).
 - **Arm/Disarm safety** â€” the trigger is disabled until the system is armed.
@@ -51,7 +48,7 @@ with NimBLE-Arduino installed. If future features push it over the limit, change
 - **Status LED** â€” solid while armed, 5 Hz blink while firing.
 - **Vibration motor** — distinct haptic patterns for arm, disarm, wrong code, lockout, countdown start, final-second ticks, abort, link-lost safety stop, and ignition. No idle buzz.
 - **Physical ARM button** (optional, disabled by default) â€” toggles arm state in hardware.
-- **REST API** â€” JSON endpoints for automation/testing.
+- **Shared dashboard control** â€” one BLE owner, with status and commands relayed to authorized devices.
 
 ## Pin assignments
 
@@ -72,17 +69,15 @@ change them:
 > than a few mA â€” an ESP32 GPIO can't power a motor directly. A tiny coin/ERM
 > motor on a driver board is fine; bare motors need the driver.
 
-## Network / config
+## BLE / config
 
 Defined near the top of the sketch:
 
 | Setting      | Default            |
 |--------------|--------------------|
-| SSID            | `NeoLabs-Rockets` |
-| WiFi security   | Open (no password) |
-| Arming password | `ARM_CODE = "123456"` (6-digit global code) |
+| BLE name         | `NeoLabs Launch Controller` |
+| Launch code      | `LAUNCH_CODE = "123456"` (stored only in ESP32 firmware) |
 | Lockout         | `MAX_ATTEMPTS = 10` wrong codes â†’ locked until reboot |
-| URL             | `http://192.168.4.1` |
 | Pulse length    | `TRIGGER_MS = 2000` ms |
 | Vibration       | Named patterns via `playHaptic(kind)` — non-blocking sequencer, no idle buzz |
 

@@ -8,6 +8,8 @@ const BLE_SERVICE_UUID = '8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000';
 const BLE_COMMAND_UUID = '8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000';
 const BLE_STATUS_UUID = '8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000';
 const BLE_SESSION = makeSessionId();
+const CLIENT_ID = sessionStorage.getItem('neolabs.clientId') || makeSessionId();
+sessionStorage.setItem('neolabs.clientId', CLIENT_ID);
 const LAUNCH_CHANNEL = typeof BroadcastChannel !== 'undefined'
   ? new BroadcastChannel('neolabs-launch')
   : null;
@@ -16,6 +18,7 @@ const BLE_CHANNEL = typeof BroadcastChannel !== 'undefined'
   : null;
 
 let launchCodeMemory = '';
+let launchAuthorizationCode = '';
 let launchCountdownTimer = null;
 let launchHeartbeatTimer = null;
 let blePingTimer = null;
@@ -34,14 +37,20 @@ let bleStatusData = null;
 let bleLastStatusAt = 0;
 let bleLastKnownName = localStorage.getItem('neolabs.ble.deviceName') || '';
 let bleInitDone = false;
+let sharedState = { connected: false, ownerActive: false, status: null };
+let launchEvents = null;
+let ownerHeartbeatTimer = null;
+let authStatusWaiter = null;
 
 // Launch Console wizard state
 let lcStep = 0;
 let lcOpen = false;
 
-function initBleController() {
+async function initBleController() {
   if (bleInitDone) return;
   bleInitDone = true;
+  if (!await ensureLaunchAuthorization()) return;
+  startSharedStream();
   restoreActiveLaunch();
   bindBleUi();
   publishPublicApi();
@@ -140,6 +149,17 @@ function goStep(n) {
 
 /* ─────────────────────────── Connection ─────────────────────────── */
 async function restoreGrantedBle() {
+  try {
+    const response = await fetch('/api/launch-state');
+    if (response.ok) {
+      sharedState = await response.json();
+      if (sharedState.ownerActive) {
+        setLaunchState('BLE is connected through another authorized device', 'ok');
+        renderLaunch();
+        return;
+      }
+    }
+  } catch (_) {}
   if (!hasBluetooth()) {
     setLaunchState('Web Bluetooth unavailable in this browser', 'bad');
     renderLaunch();
@@ -186,6 +206,11 @@ async function connectBle() {
   setLaunchState('Selecting BLE controller…', 'warn');
   renderLaunch();
   try {
+    const stateResponse = await fetch('/api/launch-state');
+    if (stateResponse.ok) {
+      sharedState = await stateResponse.json();
+      if (sharedState.ownerActive) throw new Error('Another authorized device already owns the BLE link');
+    }
     const device = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: 'NeoLabs' }],
       optionalServices: [BLE_SERVICE_UUID]
@@ -216,6 +241,10 @@ async function connectBleDevice(device) {
   setLaunchState(`Linked to ${bleLastKnownName}`, 'ok');
   storeBleState();
   broadcastBleState();
+  startOwnerHeartbeat();
+  setTimeout(() => fetch('/api/auth/owner', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: CLIENT_ID })
+  }).catch(() => {}), 100);
   await sendBle({ cmd: 'status' });
   startBlePing();
   resumeRestoredCountdown();
@@ -237,6 +266,7 @@ function onBleStatusChanged(event) {
 
 async function disconnectBle() {
   stopBlePing();
+  stopOwnerHeartbeat();
   if (launchCountdownActive) await abortLaunchCountdown();
   try { bleDevice?.gatt?.disconnect(); } catch (_) {}
   onBleDisconnected();
@@ -267,11 +297,6 @@ async function armLaunch() {
     setLaunchState('Complete the safety checklist before arming', 'warn');
     return;
   }
-  const code = getVisibleCode();
-  if (!isValidCode(code)) {
-    setLaunchState('Enter the 6-digit arming code', 'warn');
-    return;
-  }
   // Gate on dashboard GO state — read the badge and any specific NO-GO factors
   const goBadge = el('go-badge');
   if (goBadge?.classList.contains('nogo') || goBadge?.classList.contains('marginal')) {
@@ -288,7 +313,7 @@ async function armLaunch() {
     }
   }
   try {
-    await armWithCode(code);
+    await armWithCode('');
     setLaunchState('Arm command sent', 'warn');
   } catch (err) {
     clearLaunchCredential();
@@ -309,14 +334,9 @@ async function disarmLaunch() {
 
 async function startLaunchCountdown() {
   const seconds = clamp(Number(el('ble-count-seconds')?.value), 5, 60);
-  const code = getCommandCode();
-  if (!code) {
-    setLaunchState('Re-enter the 6-digit code before countdown', 'warn');
-    return;
-  }
   primeLaunchSpeech();
   try {
-    await startCountdownWithCode(seconds, code);
+    await startCountdownWithCode(seconds, '');
     setLaunchState('Live BLE countdown active', 'bad');
   } catch (err) {
     setLaunchState(`Countdown rejected: ${err.message || err}`, 'bad');
@@ -387,6 +407,7 @@ async function abortLaunchCountdown() {
 }
 
 async function armWithCode(code) {
+  if (!bleConnected) return sendRemoteCommand('arm', { code });
   await sendBle({ cmd: 'arm', code });
   launchCodeMemory = code;
   clearVisibleCode();
@@ -394,6 +415,7 @@ async function armWithCode(code) {
 }
 
 async function disarmController() {
+  if (!bleConnected && sharedState.ownerActive) return sendRemoteCommand('disarm');
   await sendBle({ cmd: 'disarm' });
   stopLaunchHeartbeat();
   cancelLaunchSpeech();
@@ -404,6 +426,7 @@ async function disarmController() {
 }
 
 async function startCountdownWithCode(seconds, code) {
+  if (!bleConnected) return sendRemoteCommand('countdown_start', { seconds, code });
   await sendBle({ cmd: 'countdown_start', seconds, code });
   launchCountdownEndsAt = Date.now() + seconds * 1000;
   launchCountdownActive = true;
@@ -426,6 +449,11 @@ async function abortController() {
   broadcastLaunch({ type: 'abort', reason: 'Manual abort', mode: 'ble' });
   clearLaunchCredential();
   clearPersistedLaunch();
+  if (!bleConnected && sharedState.ownerActive) {
+    await sendRemoteCommand('abort');
+    renderLaunch();
+    return;
+  }
   if (bleConnected && bleCommand) {
     try { await sendBle({ cmd: 'abort' }); } catch (_) {}
   }
@@ -479,13 +507,13 @@ function applyBleStatus(s) {
 }
 
 function currentStatus() {
-  return bleStatusData || readStoredBleStatus() || {};
+  return bleStatusData || sharedState.status || readStoredBleStatus() || {};
 }
 
 /* ─────────────────────────── Rendering ─────────────────────────── */
 function renderLaunch() {
   const status = currentStatus();
-  const linked = bleConnected;
+  const linked = bleConnected || sharedState.ownerActive;
   const armed = !!status.armed;
   const locked = !!status.locked;
   const checklistReady = allLaunchChecks();
@@ -496,12 +524,12 @@ function renderLaunch() {
   const connect = el('ble-connect');
   if (connect) {
     connect.disabled = linked || !bluetoothSupported;
-    connect.textContent = bleLastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE';
+    connect.textContent = sharedState.ownerActive && !bleConnected ? 'BLE connected on another device' : (bleLastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE');
   }
-  setDisabled('ble-disconnect', !linked);
-  setDisabled('ble-arm', !linked || armed || locked || !checklistReady || !isValidCode(getVisibleCode()));
+  setDisabled('ble-disconnect', !bleConnected);
+  setDisabled('ble-arm', !linked || armed || locked || !checklistReady);
   setDisabled('ble-disarm', !linked || !armed);
-  setDisabled('ble-launch', !linked || !armed || locked || launchCountdownActive || !credentialReady);
+  setDisabled('ble-launch', !linked || !armed || locked || launchCountdownActive);
   setDisabled('ble-abort', !linked || (!armed && !launchCountdownActive));
 
   // Modal metrics
@@ -625,7 +653,7 @@ function getCommandCode() {
 }
 
 function getVisibleCode() {
-  return (el('ble-code')?.value || '').trim();
+  return (el('ble-code')?.value || launchCodeMemory || launchAuthorizationCode || '').trim();
 }
 
 function clearVisibleCode() {
@@ -785,6 +813,8 @@ function broadcastBleState() {
     type: 'ble_state',
     connected: bleConnected,
     deviceName: bleDevice?.name || bleLastKnownName || '',
+    clientId: CLIENT_ID,
+    status: bleStatusData,
     source: 'launch-dashboard',
     at: Date.now()
   };
@@ -793,6 +823,126 @@ function broadcastBleState() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(message)
   }).catch(() => {});
+}
+
+async function ensureLaunchAuthorization() {
+  const status = await fetch('/api/auth/status').then(r => r.json()).catch(() => ({ codeRequired: false }));
+  if (!status.codeRequired || status.authenticated) return true;
+  const code = await showJoinCodeDialog();
+  if (!code) return false;
+  const response = await fetch('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code })
+  });
+  if (!response.ok) {
+    sessionStorage.setItem('neolabs.authError', 'Ungültiger Launch-Code oder BLE-Verbindung nicht erreichbar.');
+    location.reload();
+    return false;
+  }
+  launchCodeMemory = code;
+  launchAuthorizationCode = code;
+  return true;
+}
+
+function showJoinCodeDialog() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;display:grid;place-items:center;background:rgba(2,5,14,.94);padding:20px';
+    overlay.innerHTML = `<form style="width:min(420px,100%);padding:26px;border:1px solid #26385d;border-radius:16px;background:#0b1224;color:#e7efff">
+      <div style="font-size:12px;letter-spacing:.18em;color:#6faeff;text-transform:uppercase">NeoLabs Rockets</div>
+      <h2 style="margin:10px 0 8px">Launch-Code erforderlich</h2>
+      <p style="color:#9aabc9;line-height:1.5">Ein anderes Gerät hält bereits die BLE-Verbindung. Gib den im ESP32 hinterlegten Launch-Code ein, um Status und Steuerung zu teilen.</p>
+      <div style="color:#ff776d;min-height:22px;margin-top:10px">${sessionStorage.getItem('neolabs.authError') || ''}</div>
+      <input required autofocus inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="Launch-Code" style="width:100%;margin:8px 0 14px;padding:13px;border:1px solid #334a75;border-radius:9px;background:#070d1b;color:white;font-size:22px;letter-spacing:.3em;text-align:center" placeholder="••••••">
+      <button type="submit" style="width:100%;padding:13px;border:0;border-radius:9px;background:#347ee9;color:white;font-weight:700">Autorisieren</button>
+    </form>`;
+    sessionStorage.removeItem('neolabs.authError');
+    document.body.appendChild(overlay);
+    overlay.querySelector('form').addEventListener('submit', event => {
+      event.preventDefault();
+      const code = overlay.querySelector('input').value.trim();
+      if (!isValidCode(code)) return;
+      overlay.remove();
+      resolve(code);
+    });
+  });
+}
+
+function startSharedStream() {
+  launchEvents?.close();
+  launchEvents = new EventSource('/api/launch-stream');
+  launchEvents.onmessage = event => {
+    let message;
+    try { message = JSON.parse(event.data); } catch (_) { return; }
+    if (message.type === 'shared_state') {
+      sharedState = message.state || sharedState;
+      if (!bleConnected && sharedState.status) bleStatusData = sharedState.status;
+      renderLaunch();
+    } else if (message.type === 'remote_command' && bleConnected && message.ownerId === CLIENT_ID) {
+      executeRemoteCommand(message);
+    } else if (message.type === 'auth_request' && bleConnected && message.ownerId === CLIENT_ID) {
+      verifyJoinCode(message);
+    } else if (message.type === 'countdown_start' || message.type === 'countdown_tick' || message.type === 'abort' || message.type === 'ignition') {
+      if (!bleConnected && typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
+    }
+  };
+  if (authStatusWaiter && (bleStatusData.error === 'auth_ok' || bleStatusData.error === 'auth_failed')) {
+    authStatusWaiter(bleStatusData.error === 'auth_ok');
+  }
+  launchEvents.onerror = () => setLaunchState('Sync reconnecting…', 'warn');
+}
+
+async function verifyJoinCode(message) {
+  let valid = false;
+  try {
+    valid = await new Promise(async resolve => {
+      const timer = setTimeout(() => { authStatusWaiter = null; resolve(false); }, 2500);
+      authStatusWaiter = result => { clearTimeout(timer); authStatusWaiter = null; resolve(result); };
+      try { await sendBle({ cmd: 'auth', code: message.code }); } catch (_) { clearTimeout(timer); authStatusWaiter = null; resolve(false); }
+    });
+  } finally {
+    fetch('/api/auth/result', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId: CLIENT_ID, requestId: message.requestId, valid })
+    }).catch(() => {});
+  }
+}
+
+function startOwnerHeartbeat() {
+  stopOwnerHeartbeat();
+  const beat = () => relayToServer({
+    type: 'owner_heartbeat', clientId: CLIENT_ID, connected: bleConnected,
+    deviceName: bleDevice?.name || bleLastKnownName, status: bleStatusData,
+    countdown: launchCountdownActive ? { endsAt: launchCountdownEndsAt } : null
+  });
+  beat();
+  ownerHeartbeatTimer = setInterval(beat, 2000);
+}
+
+function stopOwnerHeartbeat() {
+  clearInterval(ownerHeartbeatTimer);
+  ownerHeartbeatTimer = null;
+}
+
+async function sendRemoteCommand(command, args = {}) {
+  const response = await fetch('/api/launch-command', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command, args })
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || 'Remote command failed');
+  setLaunchState('Command sent to BLE owner', 'warn');
+}
+
+async function executeRemoteCommand(message) {
+  try {
+    const { command, args = {} } = message;
+    if (command === 'arm') await armWithCode(args.code || launchCodeMemory);
+    else if (command === 'disarm') await disarmController();
+    else if (command === 'countdown_start') await startCountdownWithCode(clamp(Number(args.seconds), 5, 60), args.code || launchCodeMemory);
+    else if (command === 'abort') await abortController();
+    relayToServer({ type: 'command_result', commandId: message.commandId, ok: true, status: bleStatusData });
+  } catch (err) {
+    relayToServer({ type: 'command_result', commandId: message.commandId, ok: false, error: String(err.message || err), status: bleStatusData });
+  }
 }
 
 function storeBleState(extra = {}) {

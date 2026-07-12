@@ -37,9 +37,33 @@ const OVERPASS_ENDPOINTS = [
 const aircraftCache = new Map();
 const osmCache = new Map();
 const MAX_CACHE_ENTRIES = 200;
+const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
+const sessions = new Map();
 
 // SSE clients for cross-device launch event relay
 const sseClients = new Set();
+const OWNER_TTL_MS = 7000;
+const pendingCommands = new Map();
+const pendingAuth = new Map();
+let sharedLaunch = { ownerId: null, ownerName: '', connected: false, status: null, countdown: null, updatedAt: Date.now() };
+
+function ownerAlive() {
+  return !!sharedLaunch.ownerId && Date.now() - sharedLaunch.updatedAt < OWNER_TTL_MS;
+}
+
+function emitLaunch(payload) {
+  const line = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(line); } catch (_) { sseClients.delete(client); }
+  }
+}
+
+function publicLaunchState() {
+  if (!ownerAlive() && sharedLaunch.connected) {
+    sharedLaunch = { ...sharedLaunch, ownerId: null, connected: false, updatedAt: Date.now() };
+  }
+  return { ...sharedLaunch, ownerId: undefined, ownerActive: ownerAlive(), viewers: sseClients.size };
+}
 
 // Keep the in-memory caches bounded so a long-running controller never leaks
 // memory from unique lat/lon/dist combinations. Oldest entries are evicted first
@@ -53,32 +77,33 @@ function cacheSet(cache, key, value) {
   }
 }
 
-// ── Basic Auth ─────────────────────────────────────────────────────────────
-// Set DASHBOARD_PASSWORD in .env (or as an env var) to enable.
-// Leave it unset for local-only use — auth is skipped when the var is absent.
+// Join sessions are granted only after the connected ESP32 validates the code.
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1));
+  }
+  return out;
+}
+
+function sessionFor(req) {
+  const token = parseCookies(req).neolabs_session;
+  const session = token && sessions.get(token);
+  if (!session || session.expiresAt < Date.now()) {
+    if (token) sessions.delete(token);
+    return null;
+  }
+  session.expiresAt = Date.now() + AUTH_TTL_MS;
+  return session;
+}
+
 function requireAuth(req, res, next) {
-  const pw = process.env.DASHBOARD_PASSWORD;
-  if (!pw) return next();
-
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="NeoLabs Mission Dashboard"');
-    return res.status(401).send('Authentication required');
-  }
-
-  const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
-  const colon = decoded.indexOf(':');
-  const supplied = colon >= 0 ? decoded.slice(colon + 1) : decoded;
-
-  // Constant-time compare to resist timing attacks
-  const a = Buffer.from(supplied.padEnd(pw.length));
-  const b = Buffer.from(pw.padEnd(supplied.length));
-  const match = supplied.length === pw.length && crypto.timingSafeEqual(a, b);
-
-  if (!match) {
-    res.set('WWW-Authenticate', 'Basic realm="NeoLabs Mission Dashboard"');
-    return res.status(401).send('Invalid credentials');
-  }
+  if (!ownerAlive()) return next();
+  if (['/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-stream', '/launch-event'].includes(req.path)) return next();
+  const session = sessionFor(req);
+  if (!session) return res.status(401).json({ error: 'launch_code_required' });
+  req.launchSession = session;
   next();
 }
 
@@ -92,8 +117,40 @@ process.on('unhandledRejection', err => {
 });
 
 app.use(express.json({ limit: '256kb' }));
-app.use(requireAuth);
 app.use(express.static(path.join(__dirname)));
+
+app.get('/api/auth/status', (req, res) => res.json({ authenticated: !!sessionFor(req), codeRequired: ownerAlive() }));
+app.post('/api/auth/login', async (req, res) => {
+  if (!ownerAlive()) return res.json({ ok: true, codeRequired: false });
+  const code = String(req.body?.code || '');
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'invalid_launch_code_format' });
+  const requestId = crypto.randomUUID();
+  const valid = await new Promise(resolve => {
+    const timer = setTimeout(() => { pendingAuth.delete(requestId); resolve(false); }, 6000);
+    pendingAuth.set(requestId, result => { clearTimeout(timer); pendingAuth.delete(requestId); resolve(result); });
+    emitLaunch({ type: 'auth_request', requestId, code, ownerId: sharedLaunch.ownerId });
+  });
+  if (!valid) return res.status(401).json({ error: 'invalid_launch_code' });
+  const token = crypto.randomBytes(32).toString('base64url');
+  sessions.set(token, { id: crypto.randomUUID(), expiresAt: Date.now() + AUTH_TTL_MS });
+  res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
+  res.json({ ok: true });
+});
+app.post('/api/auth/result', (req, res) => {
+  if (!ownerAlive() || req.body?.clientId !== sharedLaunch.ownerId) return res.status(403).json({ error: 'not_ble_owner' });
+  const complete = pendingAuth.get(String(req.body?.requestId || ''));
+  if (!complete) return res.status(404).json({ error: 'auth_request_expired' });
+  complete(req.body?.valid === true);
+  res.json({ ok: true });
+});
+app.post('/api/auth/owner', (req, res) => {
+  if (!ownerAlive() || req.body?.clientId !== sharedLaunch.ownerId) return res.status(403).json({ error: 'not_ble_owner' });
+  const token = crypto.randomBytes(32).toString('base64url');
+  sessions.set(token, { id: crypto.randomUUID(), expiresAt: Date.now() + AUTH_TTL_MS });
+  res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
+  res.json({ ok: true });
+});
+app.use('/api', requireAuth);
 
 // Proxy aircraft API — browser can't call adsb.fi directly (CORS)
 function sleep(ms) {
@@ -286,8 +343,8 @@ app.get('/api/aircraft', async (req, res) => {
 });
 
 // ── Cross-device SSE relay ──────────────────────────────────────────────────
-// The laptop holds the BLE connection; phones/tablets on the same WiFi subscribe
-// here and receive countdown events in real time via Server-Sent Events.
+// One browser owns BLE; every authorized browser receives state and can route
+// commands through that owner in real time via Server-Sent Events.
 
 app.get('/api/launch-stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -296,16 +353,62 @@ app.get('/api/launch-stream', (req, res) => {
   res.flushHeaders();
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
   sseClients.add(res);
+  res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
   req.on('close', () => { sseClients.delete(res); clearInterval(keepAlive); });
 });
 
 app.post('/api/launch-event', (req, res) => {
   const payload = req.body;
   if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'bad payload' });
-  const line = `data: ${JSON.stringify(payload)}\n\n`;
-  sseClients.forEach(client => { try { client.write(line); } catch (_) {} });
+  if (payload.type === 'owner_heartbeat' || payload.type === 'ble_state') {
+    const clientId = String(payload.clientId || '');
+    if (!clientId) return res.status(400).json({ error: 'client_id_required' });
+    if (!payload.connected && sharedLaunch.ownerId && sharedLaunch.ownerId !== clientId) {
+      return res.json({ ok: true, ignored: true, clients: sseClients.size });
+    }
+    if (payload.connected && ownerAlive() && sharedLaunch.ownerId !== clientId) {
+      return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
+    }
+    sharedLaunch = {
+      ...sharedLaunch,
+      ownerId: payload.connected ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
+      ownerName: payload.connected ? String(payload.deviceName || 'NeoLabs controller') : '',
+      connected: !!payload.connected,
+      status: payload.status || sharedLaunch.status,
+      countdown: payload.countdown ?? sharedLaunch.countdown,
+      updatedAt: Date.now()
+    };
+    emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  } else if (payload.type === 'command_result') {
+    pendingCommands.delete(String(payload.commandId || ''));
+    if (payload.status) sharedLaunch.status = payload.status;
+    sharedLaunch.updatedAt = Date.now();
+    emitLaunch(payload);
+    emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  } else {
+    emitLaunch(payload);
+  }
   res.json({ ok: true, clients: sseClients.size });
 });
+
+app.get('/api/launch-state', (req, res) => res.json(publicLaunchState()));
+
+app.post('/api/launch-command', (req, res) => {
+  if (!ownerAlive()) return res.status(503).json({ error: 'no_ble_owner' });
+  const allowed = new Set(['arm', 'disarm', 'countdown_start', 'abort']);
+  const command = String(req.body?.command || '');
+  if (!allowed.has(command)) return res.status(400).json({ error: 'invalid_command' });
+  const commandId = crypto.randomUUID();
+  pendingCommands.set(commandId, Date.now());
+  emitLaunch({ type: 'remote_command', commandId, command, args: req.body?.args || {}, ownerId: sharedLaunch.ownerId });
+  res.status(202).json({ ok: true, commandId });
+});
+
+setInterval(() => {
+  if (!ownerAlive() && sharedLaunch.connected) emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  for (const [id, at] of pendingCommands) if (Date.now() - at > 15000) pendingCommands.delete(id);
+  for (const [token, session] of sessions) if (session.expiresAt < Date.now()) sessions.delete(token);
+}, 2000).unref();
 
 // Unknown API routes get a clean JSON 404 instead of silently returning the
 // dashboard HTML (which would break client-side JSON parsing).
