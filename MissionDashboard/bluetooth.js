@@ -1,13 +1,14 @@
 /*
-  NeoLabs Mission Dashboard — BLE launch controller (single shared link).
-  Now that the dashboard, finder, and camera live in one document there is exactly
-  one BLE connection for the whole app, driven through the guided Launch Console
-  wizard (Connect → Checklist → Arm → Launch).
+  NeoLabs Mission Dashboard — launch orchestration.
+
+  Transport and sync are delegated to two dedicated modules:
+    · ble-link.js    (NeoBleLink)    — resilient Web Bluetooth link with
+                                       auto-reconnect, timeouts, and watchdog
+    · launch-sync.js (NeoLaunchSync) — SSE stream, owner lease, remote RPC
+
+  This file owns the Launch Console wizard, countdown/heartbeat logic, speech,
+  shared-state rendering, and the camera/HUD bridges.
 */
-const BLE_SERVICE_UUID = '8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000';
-const BLE_COMMAND_UUID = '8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000';
-const BLE_STATUS_UUID = '8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000';
-const BLE_SESSION = makeSessionId();
 const CLIENT_ID = sessionStorage.getItem('neolabs.clientId') || makeSessionId();
 sessionStorage.setItem('neolabs.clientId', CLIENT_ID);
 let resolveAuthReady;
@@ -19,57 +20,53 @@ const BLE_CHANNEL = typeof BroadcastChannel !== 'undefined'
   ? new BroadcastChannel('neolabs-ble')
   : null;
 
+const bleLink = new NeoBleLink();
+const sync = new NeoLaunchSync(CLIENT_ID);
+
 let launchCodeMemory = '';
 let launchCountdownTimer = null;
 let launchHeartbeatTimer = null;
-let blePingTimer = null;
 let launchCountdownEndsAt = 0;
 let launchCountdownActive = false;
 let launchLastSpokenSecond = null;
 let launchAudioCtx = null;
 let launchSpeechReady = false;
 
-let bleDevice = null;
-let bleServer = null;
-let bleCommand = null;
-let bleStatus = null;
-let bleConnected = false;
 let bleStatusData = null;
-let bleLastStatusAt = 0;
-let bleWriteChain = Promise.resolve();
-let bleWriteFailures = 0;
 let bleStatusRevision = 0;
-let bleLastKnownName = localStorage.getItem('neolabs.ble.deviceName') || '';
 let bleInitDone = false;
 let sharedState = { connected: false, ownerActive: false, status: null };
 let sharedCountdownActive = false;
 let sharedCountdownEndsAt = 0;
 let sharedStateReceivedAt = 0;
-let launchEvents = null;
 let ownerHeartbeatTimer = null;
 let authStatusWaiter = null;
 let authVerificationQueue = Promise.resolve();
-const pendingRemoteCommands = new Map();
 let joinAuthorized = false;
-let serverLink = { state: 'marginal', latency: null, failures: 0, checkedAt: 0 };
 let serverClientCount = 1;
 
 // Launch Console wizard state
 let lcStep = 0;
 let lcOpen = false;
 
-async function initBleController() {
+function initBleController() {
   if (bleInitDone) return;
   bleInitDone = true;
   resolveAuthReady(true);
-  startSharedStream();
+  wireBleLink();
+  wireSync();
+  sync.start();
   restoreActiveLaunch();
   bindBleUi();
   publishPublicApi();
   renderLaunch();
   restoreGrantedBle();
   setInterval(checkLaunchLinkHealth, 1000);
-  startServerLinkMonitor();
+  // Release the owner lease the moment this page goes away so another device
+  // can take over immediately instead of waiting out the server-side TTL.
+  window.addEventListener('pagehide', () => {
+    if (bleLink.connected || bleLink.state === 'reconnecting') sync.releaseOwner('pagehide');
+  });
 }
 
 if (document.readyState === 'loading') {
@@ -109,7 +106,7 @@ function publishPublicApi() {
   window.NeoLaunch = {
     open: openLaunchConsole,
     close: closeLaunchConsole,
-    connected: () => bleConnected || sharedState.ownerActive,
+    connected: () => bleLink.connected || sharedState.ownerActive,
     countdownActive: () => launchCountdownActive || sharedCountdownActive,
     status: () => bleStatusData || {}
   };
@@ -135,7 +132,7 @@ function closeLaunchConsole() {
 }
 
 function stepSatisfied(n) {
-  if (n === 0) return bleConnected || sharedState.ownerActive;
+  if (n === 0) return bleLink.connected || sharedState.ownerActive;
   if (n === 1) return allLaunchChecks();
   if (n === 2) return !!(currentStatus().armed);
   return true;
@@ -160,50 +157,129 @@ function goStep(n) {
   renderLaunch();
 }
 
+/* ─────────────────────────── BLE link wiring ─────────────────────────── */
+function wireBleLink() {
+  bleLink.on('state', handleLinkState);
+  bleLink.on('status', applyBleStatus);
+  bleLink.on('health', ({ staleMs }) => {
+    if (staleMs > 3500) setLaunchState('BLE status stale — waiting for ESP32', 'warn');
+  });
+}
+
+function handleLinkState(detail) {
+  if (detail.state === 'connecting') {
+    setLaunchState(`Connecting to ${bleLink.deviceName || 'controller'}…`, 'warn');
+  } else if (detail.state === 'connected') {
+    onBleLinkUp();
+  } else if (detail.state === 'reconnecting') {
+    onBleReconnecting(detail);
+  } else if (detail.state === 'idle') {
+    onBleLinkDown(detail);
+  }
+  renderLaunch();
+}
+
+async function onBleLinkUp() {
+  setLaunchState(`Linked to ${bleLink.deviceName || 'controller'}`, 'ok');
+  storeBleState();
+  const claim = await sync.claimOwner({ deviceName: bleLink.deviceName || 'NeoLabs controller', status: bleStatusData });
+  if (claim.conflict) {
+    bleLink.disconnect(); // synchronous state event — message below must win
+    if (claim.state) { sharedState = claim.state; sharedStateReceivedAt = Date.now(); }
+    setLaunchState('Another device already owns the BLE connection', 'bad');
+    renderLaunch();
+    return;
+  }
+  if (!claim.ok) {
+    // Local BLE control still works; the dashboard just won't sync to other
+    // devices until the server comes back.
+    setLaunchState('BLE linked, but dashboard sync is unavailable', 'warn');
+  } else if (claim.state) {
+    sharedState = claim.state;
+    sharedStateReceivedAt = Date.now();
+  }
+  broadcastBleState();
+  startOwnerHeartbeat();
+  resumeRestoredCountdown();
+  if (lcOpen && lcStep === 0) goStep(1);
+  renderLaunch();
+}
+
+function onBleReconnecting(detail) {
+  // Heartbeat writes would fail while the link is down; the ESP32 safe-stops
+  // on its own 3 s heartbeat timeout. If the link returns before the local
+  // countdown expires, the tick loop resumes heartbeats automatically.
+  stopLaunchHeartbeat();
+  const attempt = detail.attempt ? ` (attempt ${detail.attempt})` : '';
+  setLaunchState(`BLE dropped — reconnecting${attempt}…`, 'warn');
+  storeBleState();
+  publishOwnerSnapshot();
+}
+
+function onBleLinkDown(detail) {
+  stopLaunchHeartbeat();
+  stopOwnerHeartbeat();
+  bleLink.setPingSuspended(false);
+  if (launchCountdownActive) {
+    cancelLaunchSpeech();
+    stopLaunchCountdownUi('BLE link lost');
+    broadcastLaunch({ type: 'abort', reason: 'BLE link lost', mode: 'ble' });
+    clearPersistedLaunch();
+  }
+  bleStatusData = null;
+  sync.releaseOwner(detail.reason || 'link_down');
+  sharedState = { ...sharedState, connected: false, ownerActive: false, ownerName: '', status: null, countdown: null };
+  sharedCountdownActive = false;
+  sharedCountdownEndsAt = 0;
+  broadcastBleState();
+  if (detail.reason === 'gave_up') {
+    setLaunchState('Reconnect failed — check controller power and range, then reconnect', 'bad');
+  } else if (detail.reason === 'user') {
+    setLaunchState('BLE disconnected. Reconnect before launch.', 'warn');
+  } else if (detail.reason !== 'connect_failed') {
+    setLaunchState('BLE disconnected. Reconnect before launch.', 'bad');
+  }
+  storeBleState();
+  renderLaunch();
+}
+
 /* ─────────────────────────── Connection ─────────────────────────── */
 async function restoreGrantedBle() {
   try {
-    const response = await fetch('/api/launch-state');
-    if (response.ok) {
-      sharedState = await response.json();
-      if (sharedState.ownerActive) {
-        setLaunchState('BLE is connected through another authorized device', 'ok');
-        renderLaunch();
-        return;
-      }
+    const state = await sync.fetchState();
+    sharedState = state;
+    sharedStateReceivedAt = Date.now();
+    if (state.ownerActive) {
+      setLaunchState('BLE is connected through another authorized device', 'ok');
+      renderLaunch();
+      return;
     }
   } catch (_) {}
-  if (!hasBluetooth()) {
+  if (!NeoBleLink.supported()) {
     setLaunchState('Web Bluetooth unavailable in this browser', 'bad');
-    renderLaunch();
-    return; // BLE not available — console can't help
-  }
-  if (!navigator.bluetooth.getDevices) {
-    setLaunchState('Connecting…', 'warn');
     renderLaunch();
     return;
   }
   try {
-    const devices = await navigator.bluetooth.getDevices();
-    const candidate = devices.find(d => /^NeoLabs/i.test(d.name || '')) || devices.find(d => d.name === bleLastKnownName);
-    if (!candidate) {
-      setLaunchState('No paired controller found', 'warn');
+    setLaunchState('Looking for paired controller…', 'warn');
+    renderLaunch();
+    const restored = await bleLink.restoreGranted();
+    if (!restored) {
+      setLaunchState('No paired controller found — open the console to connect', 'warn');
       renderLaunch();
-      return;
     }
-    bleDevice = candidate;
-    attachDisconnectListener(candidate);
-    setLaunchState(`Reconnecting to ${candidate.name || 'controller'}…`, 'warn');
-    await connectBleDevice(candidate);
-    // Successfully reconnected — no need to open console
-  } catch (err) {
+  } catch (_) {
     setLaunchState('Could not reconnect — open console to retry', 'warn');
     renderLaunch();
   }
 }
 
 async function connectBle() {
-  if (!hasBluetooth()) {
+  if (bleLink.state === 'reconnecting') {
+    bleLink.retryNow();
+    return;
+  }
+  if (!NeoBleLink.supported()) {
     setLaunchState('Web Bluetooth is not available in this browser', 'bad');
     renderLaunch();
     return;
@@ -211,96 +287,24 @@ async function connectBle() {
   setLaunchState('Selecting BLE controller…', 'warn');
   renderLaunch();
   try {
-    const stateResponse = await fetch('/api/launch-state');
-    if (stateResponse.ok) {
-      sharedState = await stateResponse.json();
-      if (sharedState.ownerActive) throw new Error('Another authorized device already owns the BLE link');
+    const state = await sync.fetchState().catch(() => null);
+    if (state) {
+      sharedState = state;
+      sharedStateReceivedAt = Date.now();
+      if (state.ownerActive) throw new Error('Another authorized device already owns the BLE link');
     }
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'NeoLabs' }],
-      optionalServices: [BLE_SERVICE_UUID]
-    });
-    await connectBleDevice(device);
+    await bleLink.connectViaChooser();
   } catch (err) {
     setLaunchState(`BLE connect failed: ${err.message || err}`, 'bad');
-    bleConnected = false;
     storeBleState();
     renderLaunch();
   }
 }
 
-async function connectBleDevice(device) {
-  bleDevice = device;
-  bleLastKnownName = device.name || bleLastKnownName || 'NeoLabs ESP32';
-  localStorage.setItem('neolabs.ble.deviceName', bleLastKnownName);
-  attachDisconnectListener(device);
-
-  bleServer = await device.gatt.connect();
-  const service = await bleServer.getPrimaryService(BLE_SERVICE_UUID);
-  bleCommand = await service.getCharacteristic(BLE_COMMAND_UUID);
-  bleStatus = await service.getCharacteristic(BLE_STATUS_UUID);
-  bleStatus.addEventListener('characteristicvaluechanged', onBleStatusChanged);
-  await bleStatus.startNotifications();
-  bleConnected = true;
-  bleLastStatusAt = Date.now();
-  setLaunchState(`Linked to ${bleLastKnownName}`, 'ok');
-  await sendBle({ cmd: 'status' });
-  storeBleState();
-  const claimed = await claimOwnerSession();
-  if (!claimed) {
-    try { device.gatt.disconnect(); } catch (_) {}
-    throw new Error('BLE connected, but the server rejected owner registration');
-  }
-  broadcastBleState();
-  startOwnerHeartbeat();
-  startBlePing();
-  resumeRestoredCountdown();
-  if (lcOpen && lcStep === 0) goStep(1);
-  renderLaunch();
-}
-
-function attachDisconnectListener(device) {
-  try {
-    device.removeEventListener('gattserverdisconnected', onBleDisconnected);
-    device.addEventListener('gattserverdisconnected', onBleDisconnected);
-  } catch (_) {}
-}
-
-function onBleStatusChanged(event) {
-  const text = new TextDecoder().decode(event.target.value);
-  try { applyBleStatus(JSON.parse(text)); } catch (_) {}
-}
-
 async function disconnectBle() {
-  stopBlePing();
-  stopOwnerHeartbeat();
   if (launchCountdownActive) await abortLaunchCountdown();
-  try { bleDevice?.gatt?.disconnect(); } catch (_) {}
-  onBleDisconnected();
-}
-
-function onBleDisconnected() {
-  if (!bleConnected && !bleCommand) return;
-  try { if (bleDevice?.gatt?.connected) bleDevice.gatt.disconnect(); } catch (_) {}
-  const wasControllingCountdown = launchCountdownActive;
-  bleConnected = false;
-  bleServer = null;
-  bleCommand = null;
-  bleStatus = null;
-  stopBlePing();
-  stopLaunchHeartbeat();
-  sharedState = { ...sharedState, connected: false, ownerActive: false, status: null, countdown: null };
-  sharedCountdownActive = false;
-  sharedCountdownEndsAt = 0;
-  broadcastBleState();
-  if (wasControllingCountdown) {
-    persistActiveLaunch();
-    setLaunchState('BLE dropped during countdown — ESP32 will safe-stop on heartbeat loss', 'bad');
-  } else {
-    setLaunchState('BLE disconnected. Reconnect before launch.', 'bad');
-  }
-  storeBleState();
-  renderLaunch();
+  sync.releaseOwner('user_disconnect');
+  bleLink.disconnect();
 }
 
 /* ─────────────────────────── Commands ─────────────────────────── */
@@ -358,6 +362,18 @@ async function startLaunchCountdown() {
 
 async function runLaunchCountdownTick() {
   if (!launchCountdownActive) return;
+  // The ESP32 safe-stops 3 s after the last heartbeat. If the BLE link has
+  // been gone longer than that, the controller has already aborted — reflect
+  // it instead of counting down to a trigger that can never fire.
+  if (!bleLink.connected && Date.now() - (bleLink.lastActivityAt || 0) > 4000) {
+    cancelLaunchSpeech();
+    stopLaunchCountdownUi('Controller safe-stopped (BLE lost)');
+    broadcastLaunch({ type: 'abort', reason: 'BLE link lost', mode: 'ble' });
+    clearPersistedLaunch();
+    setLaunchState('Countdown aborted — BLE link lost, controller safe-stopped', 'bad');
+    renderLaunch();
+    return;
+  }
   const leftMs = launchCountdownEndsAt - Date.now();
   const left = Math.max(0, Math.ceil(leftMs / 1000));
   broadcastLaunch({ type: 'countdown_tick', left, leftMs: Math.max(0, leftMs), endsAt: launchCountdownEndsAt, mode: 'ble' });
@@ -366,6 +382,7 @@ async function runLaunchCountdownTick() {
   setText('ble-countdown-sub', 'BLE heartbeat active');
   if (left <= 0) {
     stopLaunchHeartbeat();
+    bleLink.setPingSuspended(false);
     stopLaunchCountdownUi('Trigger command sent');
     broadcastLaunch({ type: 'ignition', mode: 'ble' });
     try {
@@ -379,7 +396,9 @@ async function runLaunchCountdownTick() {
 
 function startLaunchHeartbeat() {
   stopLaunchHeartbeat();
+  bleLink.setPingSuspended(true);
   launchHeartbeatTimer = setInterval(() => {
+    if (!bleLink.connected) return;
     const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
     sendBle({ cmd: 'heartbeat', left }).catch(() => {});
   }, 700);
@@ -388,22 +407,7 @@ function startLaunchHeartbeat() {
 function stopLaunchHeartbeat() {
   clearInterval(launchHeartbeatTimer);
   launchHeartbeatTimer = null;
-}
-
-function startBlePing() {
-  stopBlePing();
-  blePingTimer = setInterval(async () => {
-    // Skip during active countdown — the heartbeat (every 700ms) already proves the link
-    // is live. Running both concurrently causes GATT write conflicts that throw and
-    // falsely trigger onBleDisconnected.
-    if (!bleConnected || !bleCommand || launchCountdownActive) return;
-    try { await sendBle({ cmd: 'status' }); } catch (_) {}
-  }, 1500);
-}
-
-function stopBlePing() {
-  clearInterval(blePingTimer);
-  blePingTimer = null;
+  bleLink.setPingSuspended(false);
 }
 
 async function abortLaunchCountdown() {
@@ -411,14 +415,14 @@ async function abortLaunchCountdown() {
 }
 
 async function armWithCode(code) {
-  if (!bleConnected) return sendRemoteCommand('arm', { code });
+  if (!bleLink.connected) return sendRemoteCommand('arm', { code });
   await sendBle({ cmd: 'arm' });
   clearVisibleCode();
   renderLaunch();
 }
 
 async function disarmController() {
-  if (!bleConnected && sharedState.ownerActive) return sendRemoteCommand('disarm');
+  if (!bleLink.connected && sharedState.ownerActive) return sendRemoteCommand('disarm');
   await sendBle({ cmd: 'disarm' });
   stopLaunchHeartbeat();
   cancelLaunchSpeech();
@@ -429,7 +433,7 @@ async function disarmController() {
 }
 
 async function startCountdownWithCode(seconds, code) {
-  if (!bleConnected) return sendRemoteCommand('countdown_start', { seconds, code });
+  if (!bleLink.connected) return sendRemoteCommand('countdown_start', { seconds, code });
   await sendBle({ cmd: 'countdown_start', seconds });
   launchCountdownEndsAt = Date.now() + seconds * 1000;
   launchCountdownActive = true;
@@ -444,7 +448,7 @@ async function startCountdownWithCode(seconds, code) {
 }
 
 async function abortController() {
-  if (!bleConnected && sharedState.ownerActive) {
+  if (!bleLink.connected && sharedState.ownerActive) {
     await sendRemoteCommand('abort');
     renderLaunch();
     return;
@@ -456,7 +460,7 @@ async function abortController() {
   broadcastLaunch({ type: 'abort', reason: 'Manual abort', mode: 'ble' });
   clearLaunchCredential();
   clearPersistedLaunch();
-  if (bleConnected && bleCommand) {
+  if (bleLink.connected) {
     try { await sendBle({ cmd: 'abort' }); } catch (_) {}
   }
   if (wasActive) setLaunchState('Countdown aborted', 'warn');
@@ -472,29 +476,12 @@ function stopLaunchCountdownUi(reason) {
   setText('ble-countdown-sub', reason || 'No active sequence');
 }
 
-async function sendBle(payload) {
-  if (!bleCommand || !bleConnected) throw new Error('BLE not connected');
-  const body = JSON.stringify({ ...payload, sid: BLE_SESSION, seq: Date.now() });
-  const write = bleWriteChain.catch(() => {}).then(async () => {
-    if (!bleCommand || !bleConnected) throw new Error('BLE not connected');
-    try {
-      await bleCommand.writeValueWithResponse(new TextEncoder().encode(body));
-      bleWriteFailures = 0;
-      bleLastStatusAt = Date.now();
-    } catch (error) {
-      bleWriteFailures++;
-      const gattConnected = !!bleDevice?.gatt?.connected;
-      if (!gattConnected || (bleWriteFailures >= 3 && Date.now() - bleLastStatusAt > 5000)) onBleDisconnected();
-      throw error;
-    }
-  });
-  bleWriteChain = write;
-  return write;
+function sendBle(payload) {
+  return bleLink.send(payload);
 }
 
 function applyBleStatus(s) {
   const wasArmed = !!(bleStatusData && bleStatusData.armed);
-  bleLastStatusAt = Date.now();
   bleStatusRevision++;
   bleStatusData = {
     armed: !!s.a,
@@ -521,19 +508,21 @@ function applyBleStatus(s) {
   }
   if (bleStatusData.armed && !wasArmed && lcOpen && lcStep < 3) goStep(3);
   storeBleState();
-  if (bleConnected) publishOwnerSnapshot();
+  if (bleLink.connected) publishOwnerSnapshot();
   renderLaunch();
 }
 
 function publishOwnerSnapshot() {
+  if (!bleLink.connected && bleLink.state !== 'reconnecting') return;
+  const reconnecting = bleLink.state === 'reconnecting';
   const countdownLeftMs = Math.max(0, launchCountdownEndsAt - Date.now());
-  relayToServer({
+  sync.relay({
     type: 'owner_heartbeat',
-    clientId: CLIENT_ID,
-    connected: true,
-    deviceName: bleDevice?.name || bleLastKnownName || 'NeoLabs controller',
-    status: bleStatusData,
-    countdown: launchCountdownActive
+    connected: bleLink.connected,
+    reconnecting,
+    deviceName: bleLink.deviceName || 'NeoLabs controller',
+    status: bleLink.connected ? bleStatusData : null,
+    countdown: bleLink.connected && launchCountdownActive
       ? { active: true, endsAt: launchCountdownEndsAt, left: Math.ceil(countdownLeftMs / 1000), leftMs: countdownLeftMs }
       : { active: false, endsAt: null, left: 0 }
   });
@@ -557,38 +546,47 @@ function currentStatus() {
 /* ─────────────────────────── Rendering ─────────────────────────── */
 function renderLaunch() {
   const status = currentStatus();
-  const linked = bleConnected || sharedState.ownerActive;
+  const reconnecting = bleLink.state === 'reconnecting';
+  const connecting = bleLink.state === 'connecting';
+  const linked = bleLink.connected || sharedState.ownerActive;
   const armed = !!status.armed;
   const locked = !!status.locked;
   const countdownLive = launchCountdownActive || sharedCountdownActive || !!status.countdown;
   const checklistReady = allLaunchChecks();
-  const credentialReady = hasLaunchCredential();
-  const bluetoothSupported = hasBluetooth();
+  const bluetoothSupported = NeoBleLink.supported();
 
   // Buttons
   const connect = el('ble-connect');
   if (connect) {
-    connect.disabled = linked || !bluetoothSupported;
-    connect.textContent = sharedState.ownerActive && !bleConnected ? 'BLE connected on another device' : (bleLastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE');
+    connect.disabled = !bluetoothSupported || connecting || (linked && !reconnecting);
+    connect.textContent = reconnecting
+      ? 'Retry now'
+      : connecting
+      ? 'Connecting…'
+      : sharedState.ownerActive && !bleLink.connected
+      ? 'BLE connected on another device'
+      : bleLink.lastKnownName && !linked ? 'Reconnect BLE' : 'Connect BLE';
   }
-  setDisabled('ble-disconnect', !bleConnected);
-  setDisabled('ble-arm', !linked || armed || locked || !checklistReady);
-  setDisabled('ble-disarm', !linked || !armed);
-  setDisabled('ble-launch', !linked || !armed || locked || countdownLive);
+  setDisabled('ble-disconnect', !bleLink.connected && !reconnecting && !connecting);
+  setDisabled('ble-arm', !linked || armed || locked || !checklistReady || reconnecting);
+  setDisabled('ble-disarm', !linked || !armed || reconnecting);
+  setDisabled('ble-launch', !linked || !armed || locked || countdownLive || reconnecting);
   setDisabled('ble-abort', !linked || (!armed && !countdownLive));
 
   // Modal metrics
   setText('ble-armed', armed ? 'Yes' : 'No');
   setText('ble-clients', status.clients ?? 0);
-  setText('ble-control-mode', bleConnected ? 'Direct BLE' : linked ? 'Shared' : 'Offline');
-  const linkedName = bleConnected ? (bleLastKnownName || 'Linked') : (sharedState.ownerName || 'Shared BLE link');
+  setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
+  const linkedName = bleLink.connected || reconnecting
+    ? (bleLink.deviceName || 'Linked')
+    : (sharedState.ownerName || 'Shared BLE link');
   setText('lc-m-link', linked ? linkedName : 'Offline');
 
   // Modal status badge
   const badge = el('ble-go-badge');
   const label = el('ble-go-label');
-  if (badge) badge.className = `go-badge ${!linked ? 'marginal' : locked ? 'nogo' : armed ? 'nogo' : 'go'}`;
-  if (label) label.textContent = !linked ? 'LINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
+  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked ? 'nogo' : armed ? 'nogo' : 'go'}`;
+  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
 
   // Dashboard summary card
   setText('ds-link', el('ble-state')?.textContent || (linked ? 'Linked' : 'Not connected'));
@@ -597,11 +595,10 @@ function renderLaunch() {
   setText('ds-countdown', countdownLive ? 'Active' : 'Idle');
   setText('ds-countdown-sub', launchCountdownActive ? 'BLE heartbeat live' : sharedCountdownActive ? 'Synchronized from BLE owner' : 'No active sequence');
   setText('ds-clients', serverClientCount);
-  renderServerLink();
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked ? 'marginal' : armed ? 'nogo' : 'go'}`;
-  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
+  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : armed ? 'nogo' : 'go'}`;
+  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
 
   // camera.js owns its label so direct/shared state cannot be overwritten by a
   // generic launch-console render. Keep a fallback for pages without that hook.
@@ -638,16 +635,17 @@ function renderLaunch() {
     }
   }
 
-  updateLaunchNote(bluetoothSupported, linked, armed, locked);
+  updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnecting);
 }
 
-function updateLaunchNote(bluetoothSupported, linked, armed, locked) {
+function updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnecting) {
   const note = el('ble-note');
   if (!note) return;
   if (!bluetoothSupported) {
     note.textContent = 'Web Bluetooth needs Chrome or Edge over localhost/HTTPS to reach the controller.';
     return;
   }
+  if (reconnecting) { note.textContent = 'Link dropped — automatic reconnect in progress. Commands resume once relinked.'; return; }
   if (locked) { note.textContent = 'Controller locked after too many wrong codes — reboot the ESP32 to reset.'; return; }
   if (lcStep === 0) note.textContent = linked
     ? `Linked${currentStatus().firmwareVersion ? ` · firmware ${currentStatus().firmwareVersion}` : ''}. Continue to the checklist.`
@@ -658,22 +656,14 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked) {
 }
 
 function checkLaunchLinkHealth() {
-  if (bleConnected && bleLastStatusAt) {
-    const staleMs = Date.now() - bleLastStatusAt;
-    if (staleMs > 8000) {
-      // Ping has fired 4+ times with no response — treat as a dead connection
-      setLaunchState('BLE link lost (no response for 8 s) — reconnect', 'bad');
-      onBleDisconnected();
-    } else if (staleMs > 3500) {
-      setLaunchState('BLE status stale — waiting for ESP32', 'warn');
-    }
-  }
-  if (!bleConnected && sharedState.ownerActive && sharedStateReceivedAt && Date.now() - sharedStateReceivedAt > 8000) {
+  // The BLE link watchdog lives in ble-link.js. Here we only expire shared
+  // (server-relayed) state when the owner's heartbeats stop arriving.
+  if (!bleLink.connected && sharedState.ownerActive && sharedStateReceivedAt && Date.now() - sharedStateReceivedAt > 8000) {
     sharedState = { connected: false, ownerActive: false, ownerName: '', status: null, countdown: null };
     bleStatusData = null;
     applySharedCountdownState(null, true);
     publishCameraSharedState();
-    setLaunchState('Shared BLE sync lost - reconnecting', 'warn');
+    setLaunchState('Shared BLE sync lost — reconnecting', 'warn');
   }
   renderLaunch();
 }
@@ -693,24 +683,6 @@ function setLaunchState(text, state) {
 function allLaunchChecks() {
   const checks = [...document.querySelectorAll('.ble-check')];
   return checks.length === 0 || checks.every(c => c.checked);
-}
-
-function hasLaunchCredential() {
-  return !!launchCodeMemory || isValidCode(getVisibleCode());
-}
-
-function getCommandCode() {
-  const visible = getVisibleCode();
-  if (isValidCode(visible)) {
-    launchCodeMemory = visible;
-    clearVisibleCode();
-    return visible;
-  }
-  return launchCodeMemory || '';
-}
-
-function getVisibleCode() {
-  return (el('ble-code')?.value || '').trim();
 }
 
 function clearVisibleCode() {
@@ -831,36 +803,6 @@ function isValidCode(code) {
   return /^\d{6}$/.test(code);
 }
 
-function startServerLinkMonitor() {
-  const check = async () => {
-    const started = performance.now();
-    try {
-      const response = await fetch(`/api/health?t=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const latency = Math.round(performance.now() - started);
-      serverLink = {
-        state: latency > 800 ? 'nogo' : latency > 250 ? 'marginal' : 'go',
-        latency, failures: 0, checkedAt: Date.now()
-      };
-    } catch (_) {
-      serverLink.failures++;
-      serverLink = { ...serverLink, state: 'nogo', latency: null, checkedAt: Date.now() };
-    }
-    renderServerLink();
-  };
-  check();
-  setInterval(check, 5000);
-}
-
-function renderServerLink() {
-  const quality = serverLink.state === 'go' ? 'Good' : serverLink.state === 'marginal' ? 'Limited' : 'Poor';
-  const detail = serverLink.latency == null
-    ? 'Server not responding'
-    : `${serverLink.latency} ms response time`;
-  window.NeoServerLink = { ...serverLink, quality, detail };
-  if (typeof renderStatus === 'function') renderStatus();
-}
-
 function formatControllerError(error) {
   const messages = {
     abort: 'Controller safely aborted',
@@ -889,40 +831,27 @@ function broadcastLaunch(payload) {
   // Relay to server SSE so devices on the same network receive the event.
   // Fire-and-forget: mission control must not stall waiting for the local server.
   if (payload.type !== 'countdown_tick') {
-    relayToServer(message);
-  } else if (!payload._relayThrottled) {
+    sync.relay(message);
+  } else {
     // Throttle ticks to one relay per second (150ms timer fires 6-7x/sec)
     const now = Date.now();
     if (!broadcastLaunch._lastRelay || now - broadcastLaunch._lastRelay >= 950) {
       broadcastLaunch._lastRelay = now;
-      relayToServer(message);
+      sync.relay(message);
     }
   }
 }
 
-function relayToServer(message) {
-  fetch('/api/launch-event', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...message, clientId: CLIENT_ID })
-  }).catch(() => {});
-}
-
 function broadcastBleState() {
-  const message = {
+  sync.relay({
     type: 'ble_state',
-    connected: bleConnected,
-    deviceName: bleDevice?.name || bleLastKnownName || '',
-    clientId: CLIENT_ID,
+    connected: bleLink.connected,
+    reconnecting: bleLink.state === 'reconnecting',
+    deviceName: bleLink.deviceName || '',
     status: bleStatusData,
     source: 'launch-dashboard',
     at: Date.now()
-  };
-  fetch('/api/launch-event', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(message)
-  }).catch(() => {});
+  });
 }
 
 async function ensureLaunchAuthorization() {
@@ -983,50 +912,60 @@ function showJoinCodeDialog() {
   });
 }
 
-function startSharedStream() {
-  launchEvents?.close();
-  launchEvents = new EventSource(`/api/launch-stream?clientId=${encodeURIComponent(CLIENT_ID)}`);
-  launchEvents.onmessage = event => {
-    let message;
-    try { message = JSON.parse(event.data); } catch (_) { return; }
-    if (message.type === 'shared_state') {
-      sharedState = message.state || sharedState;
-      sharedStateReceivedAt = Date.now();
-      serverClientCount = Number(sharedState.viewers) || serverClientCount;
-      if (!bleConnected) {
-        bleStatusData = sharedState.ownerActive ? (sharedState.status || null) : null;
-        applySharedCountdownState(sharedState.ownerActive ? sharedState.countdown : null, true);
-      }
-      publishCameraSharedState();
-      renderLaunch();
-    } else if (message.type === 'client_count') {
-      serverClientCount = Math.max(0, Number(message.clients) || 0);
-      renderLaunch();
-    } else if (message.type === 'remote_command' && bleConnected && message.ownerId === CLIENT_ID) {
-      executeRemoteCommand(message);
-    } else if (message.type === 'auth_request' && bleConnected && message.ownerId === CLIENT_ID) {
+/* ─────────────────────────── Server sync wiring ─────────────────────────── */
+function wireSync() {
+  sync.on('shared_state', handleSharedState);
+
+  sync.on('client_count', message => {
+    serverClientCount = Math.max(0, Number(message.clients) || 0);
+    renderLaunch();
+  });
+
+  sync.on('remote_command', message => {
+    if (bleLink.connected && message.ownerId === CLIENT_ID) executeRemoteCommand(message);
+  });
+
+  sync.on('auth_request', message => {
+    if (bleLink.connected && message.ownerId === CLIENT_ID) {
       authVerificationQueue = authVerificationQueue.then(() => verifyJoinCode(message)).catch(() => {});
-    } else if (message.type === 'command_result') {
-      const pending = pendingRemoteCommands.get(message.commandId);
-      if (pending) {
-        pendingRemoteCommands.delete(message.commandId);
-        clearTimeout(pending.timer);
-        if (message.ok) pending.resolve(message);
-        else pending.reject(new Error(message.error || 'Command rejected by BLE controller'));
-      }
-    } else if (message.type === 'countdown_start' || message.type === 'countdown_tick' || message.type === 'abort' || message.type === 'ignition') {
-      if (!bleConnected) applySharedLaunchEvent(message);
-      if (!bleConnected && typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
     }
-  };
-  launchEvents.onopen = () => {
-    if (bleConnected) setLaunchState(`Linked to ${bleLastKnownName || 'controller'}`, 'ok');
-    else if (sharedState.ownerActive) setLaunchState('Connected through shared BLE owner', 'ok');
-  };
-  launchEvents.onerror = () => {
-    if (sharedState.ownerActive && !bleConnected && !joinAuthorized) return;
-    setLaunchState('Sync reconnecting…', 'warn');
-  };
+  });
+
+  sync.on('launch_event', message => {
+    if (bleLink.connected) return;
+    applySharedLaunchEvent(message);
+    if (typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
+  });
+
+  sync.on('stream', ({ state }) => {
+    if (state === 'open') {
+      if (bleLink.connected) setLaunchState(`Linked to ${bleLink.deviceName || 'controller'}`, 'ok');
+      else if (sharedState.ownerActive) setLaunchState('Connected through shared BLE owner', 'ok');
+    } else if (!bleLink.connected) {
+      if (sharedState.ownerActive && !joinAuthorized) return;
+      setLaunchState('Sync reconnecting…', 'warn');
+    }
+  });
+
+  sync.on('serverlink', link => {
+    window.NeoServerLink = link;
+    if (typeof renderStatus === 'function') renderStatus();
+  });
+}
+
+function handleSharedState(state) {
+  sharedState = state || {};
+  sharedStateReceivedAt = Date.now();
+  serverClientCount = Number(sharedState.viewers) || serverClientCount;
+  if (!bleLink.connected) {
+    bleStatusData = sharedState.ownerActive ? (sharedState.status || null) : null;
+    applySharedCountdownState(sharedState.ownerActive ? sharedState.countdown : null, true);
+    if (sharedState.ownerActive && sharedState.reconnecting && bleLink.state !== 'reconnecting') {
+      setLaunchState('BLE owner is relinking to the controller…', 'warn');
+    }
+  }
+  publishCameraSharedState();
+  renderLaunch();
 }
 
 function applySharedCountdownState(countdownState, notifyCamera = false) {
@@ -1087,11 +1026,11 @@ function publishCameraSharedState() {
   try {
     window.NeoCameraBleState({
       type: 'ble_state',
-      connected: bleConnected || sharedConnected,
-      shared: !bleConnected && sharedConnected,
-      deviceName: bleDevice?.name || sharedState.ownerName || bleLastKnownName || '',
-      status: bleConnected ? bleStatusData : sharedState.status,
-      source: bleConnected ? 'local-ble' : 'shared-server',
+      connected: bleLink.connected || sharedConnected,
+      shared: !bleLink.connected && sharedConnected,
+      deviceName: bleLink.deviceName || sharedState.ownerName || '',
+      status: bleLink.connected ? bleStatusData : sharedState.status,
+      source: bleLink.connected ? 'local-ble' : 'shared-server',
       at: Number(sharedState.updatedAt) || Date.now()
     });
   } catch (_) {}
@@ -1115,36 +1054,8 @@ async function verifyJoinCode(message) {
 
 function startOwnerHeartbeat() {
   stopOwnerHeartbeat();
-  const beat = publishOwnerSnapshot;
-  beat();
-  ownerHeartbeatTimer = setInterval(beat, 1000);
-}
-
-async function claimOwnerSession() {
-  for (let attempt = 0; attempt < 4 && bleConnected; attempt++) {
-    try {
-      const response = await fetch('/api/auth/owner', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-          clientId: CLIENT_ID,
-          deviceName: bleDevice?.name || bleLastKnownName || 'NeoLabs controller',
-          status: bleStatusData
-        })
-      });
-      const body = await response.json().catch(() => ({}));
-      if (response.ok) {
-        if (body.state) sharedState = body.state;
-        return true;
-      }
-      if (response.status === 409) {
-        if (body.state) sharedState = body.state;
-        setLaunchState('Another device already owns the BLE connection', 'bad');
-        return false;
-      }
-    } catch (_) {}
-    await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
-  }
-  if (bleConnected) setLaunchState('BLE linked, but dashboard sync authorization failed', 'warn');
-  return false;
+  publishOwnerSnapshot();
+  ownerHeartbeatTimer = setInterval(publishOwnerSnapshot, 1000);
 }
 
 function stopOwnerHeartbeat() {
@@ -1152,36 +1063,9 @@ function stopOwnerHeartbeat() {
   ownerHeartbeatTimer = null;
 }
 
-async function sendRemoteCommand(command, args = {}, authorizedRetry = false) {
-  const commandId = makeSessionId();
+async function sendRemoteCommand(command, args = {}) {
   setLaunchState('Waiting for BLE controller…', 'warn');
-  const completion = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingRemoteCommands.delete(commandId);
-      reject(new Error('BLE owner did not confirm the command'));
-    }, 8000);
-    pendingRemoteCommands.set(commandId, { resolve, reject, timer });
-  });
-  const response = await fetch('/api/launch-command', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commandId, command, args })
-  });
-  const body = await response.json().catch(() => ({}));
-  if (response.status === 401 && !authorizedRetry) {
-    const pending = pendingRemoteCommands.get(commandId);
-    if (pending) clearTimeout(pending.timer);
-    pendingRemoteCommands.delete(commandId);
-    const authorized = await ensureLaunchAuthorization();
-    if (!authorized) throw new Error('Launch authorization is required to control the BLE owner');
-    startSharedStream();
-    return sendRemoteCommand(command, args, true);
-  }
-  if (!response.ok) {
-    const pending = pendingRemoteCommands.get(commandId);
-    if (pending) clearTimeout(pending.timer);
-    pendingRemoteCommands.delete(commandId);
-    throw new Error(body.error || 'Remote command failed');
-  }
-  return completion;
+  return sync.sendCommand(command, args, ensureLaunchAuthorization);
 }
 
 async function executeRemoteCommand(message) {
@@ -1192,21 +1076,22 @@ async function executeRemoteCommand(message) {
     else if (command === 'countdown_start') await startCountdownWithCode(clamp(Number(args.seconds), 5, 60), '');
     else if (command === 'abort') await abortController();
     await requestFreshBleStatus();
-    relayToServer({ type: 'command_result', commandId: message.commandId, ok: true, status: bleStatusData });
+    sync.relay({ type: 'command_result', commandId: message.commandId, ok: true, status: bleStatusData });
   } catch (err) {
-    relayToServer({ type: 'command_result', commandId: message.commandId, ok: false, error: String(err.message || err), status: bleStatusData });
+    sync.relay({ type: 'command_result', commandId: message.commandId, ok: false, error: String(err.message || err), status: bleStatusData });
   }
 }
 
 function storeBleState(extra = {}) {
-  const sharedConnected = !bleConnected && !!sharedState.ownerActive && !!sharedState.connected;
+  const sharedConnected = !bleLink.connected && !!sharedState.ownerActive && !!sharedState.connected;
   const message = {
-    connected: bleConnected || sharedConnected,
+    connected: bleLink.connected || sharedConnected,
     shared: sharedConnected,
-    deviceName: bleDevice?.name || (sharedConnected ? sharedState.ownerName : '') || bleLastKnownName || '',
-    status: bleConnected ? bleStatusData : (sharedConnected ? sharedState.status : null),
-    source: bleConnected ? 'local-ble' : sharedConnected ? 'shared-server' : 'local-state',
-    lastStatusAt: bleLastStatusAt,
+    reconnecting: bleLink.state === 'reconnecting',
+    deviceName: bleLink.deviceName || (sharedConnected ? sharedState.ownerName : '') || '',
+    status: bleLink.connected ? bleStatusData : (sharedConnected ? sharedState.status : null),
+    source: bleLink.connected ? 'local-ble' : sharedConnected ? 'shared-server' : 'local-state',
+    lastStatusAt: bleLink.lastActivityAt,
     at: Date.now(),
     ...extra
   };
@@ -1225,10 +1110,6 @@ function readStoredBleStatus() {
   } catch (_) {
     return null;
   }
-}
-
-function hasBluetooth() {
-  return typeof navigator !== 'undefined' && !!navigator.bluetooth;
 }
 
 function makeSessionId() {

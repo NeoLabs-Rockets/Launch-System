@@ -84,6 +84,8 @@
   function restoreSettings() {
     try {
       const saved = JSON.parse(localStorage.getItem(FINDER_SETTINGS_KEY) || '{}');
+      // Migrate the former 600 m highway default to the new conservative value.
+      if (String(saved['lf-highway'] ?? '') === '600') saved['lf-highway'] = '3000';
       finderControls().forEach(elm => {
         if (!(elm.id in saved)) return;
         if (elm.type === 'checkbox') elm.checked = !!saved[elm.id];
@@ -117,6 +119,10 @@
   }
 
   function locate() {
+    if (!navigator.geolocation?.getCurrentPosition) {
+      setStatus('GPS unavailable', 'Needs HTTPS or localhost — enter coordinates or click the map.', 'warn');
+      return;
+    }
     setStatus('Getting GPS', 'Waiting for browser location.', 'warn');
     navigator.geolocation.getCurrentPosition(
       pos => {
@@ -184,8 +190,6 @@
       const r = await fetch('/api/finder-analysis', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
       });
-      // Migrate the former 600 m highway default to the new conservative value.
-      if (String(saved['lf-highway'] ?? '') === '600') document.getElementById('lf-highway').value = '3000';
       if (!r.ok) throw new Error(`OSM ${r.status}`);
       const osm = await r.json();
       const candidates = osm.candidates || [];
@@ -200,273 +204,6 @@
       document.getElementById('lf-results-table').innerHTML =
         '<div class="empty-state" style="color:var(--amber)">Could not load map safety data.</div>';
     }
-  }
-
-  function normalizeFeatures(elements) {
-    return elements.map(elm => {
-      const tags = elm.tags || {};
-      const points = [];
-      if (Array.isArray(elm.geometry)) {
-        elm.geometry.forEach(p => points.push({ lat: p.lat, lon: p.lon }));
-      } else if (elm.lat != null && elm.lon != null) {
-        points.push({ lat: elm.lat, lon: elm.lon });
-      } else if (elm.center) {
-        points.push({ lat: elm.center.lat, lon: elm.center.lon });
-      }
-      return {
-        id: `${elm.type}/${elm.id}`,
-        tags,
-        points,
-        category: featureCategory(tags),
-        name: tags.name || tags.ref || tags.operator || '',
-        isArea: isAreaFeature(elm, tags, points)
-      };
-    }).filter(f => f.points.length && f.category !== 'other');
-  }
-
-  function featureCategory(tags) {
-    if (tags.aeroway) return 'airport';
-    if (tags.power === 'line' || tags.power === 'minor_line' || tags.power === 'tower' || tags.power === 'pole') return 'power';
-    if (tags.natural === 'water' || tags.waterway || ['reservoir', 'basin'].includes(tags.landuse)) return 'water';
-    if (tags.place && ['city', 'town', 'village', 'hamlet', 'suburb', 'neighbourhood', 'quarter'].includes(tags.place)) return 'settlement';
-    if (tags.building || ['residential', 'industrial', 'commercial', 'retail', 'construction', 'brownfield', 'garages', 'cemetery', 'farmyard'].includes(tags.landuse) ||
-        ['school', 'kindergarten', 'college', 'university', 'hospital', 'clinic', 'place_of_worship', 'community_centre'].includes(tags.amenity)) return 'housing';
-    if (tags.railway) return 'rail';
-    if (tags.highway) return ['motorway', 'trunk', 'primary', 'secondary'].includes(tags.highway) ? 'highway' : 'road';
-    if (tags.natural === 'wood' || tags.natural === 'tree' || tags.natural === 'tree_row' ||
-        ['forest', 'orchard', 'vineyard', 'plant_nursery'].includes(tags.landuse)) return 'trees';
-    if (['park', 'playground', 'sports_centre', 'recreation_ground'].includes(tags.leisure)) return 'public';
-    if (['farmland', 'meadow', 'grass', 'allotments'].includes(tags.landuse) ||
-        ['grassland', 'heath', 'scrub', 'bare_rock', 'sand'].includes(tags.natural) ||
-        tags.leisure === 'pitch') return 'field';
-    return 'other';
-  }
-
-  function isAreaFeature(elm, tags, points) {
-    if (points.length < 3) return false;
-    if (elm.type === 'relation') return true;
-    if (tags.area === 'yes' || tags.building || tags.landuse || tags.leisure || tags.aeroway || tags.amenity || tags.place || tags.natural === 'water') return true;
-    if (points.length > 3) {
-      const first = points[0];
-      const last = points[points.length - 1];
-      return Math.abs(first.lat - last.lat) < 1e-6 && Math.abs(first.lon - last.lon) < 1e-6;
-    }
-    return false;
-  }
-
-  function scoreCandidates(cfg, features) {
-    const grid = candidateGrid(cfg);
-    const featureIndex = buildFeatureIndex(cfg, features);
-    let scored = grid.map(p => scorePoint(p, cfg, featureIndex.nearby(p))).filter(c => !c.rejected && c.score >= cfg.minScore);
-    if (cfg.sort === 'distance') {
-      scored.sort((a, b) => haversine(cfg.lat, cfg.lon, a.lat, a.lon) - haversine(cfg.lat, cfg.lon, b.lat, b.lon));
-    } else if (cfg.sort === 'field') {
-      scored.sort((a, b) => (a.nearest.field - b.nearest.field) || (b.score - a.score));
-    } else {
-      scored.sort((a, b) => b.score - a.score);
-    }
-    return scored.slice(0, cfg.results);
-  }
-
-  // Index feature bounding boxes into kilometre-sized cells. Previously every
-  // candidate walked every OSM feature (and all of its vertices), making large
-  // searches effectively O(candidates * map detail). The index limits exact
-  // geometry checks to features close enough to affect that category's score.
-  function buildFeatureIndex(cfg, features) {
-    const cellM = 1000;
-    const cosLat = Math.max(0.2, Math.cos(cfg.lat * DEG));
-    const grids = new Map();
-    const ranges = { field: cfg.fieldPref === 'ignore' ? 0 : 600 };
-    HAZARDS.forEach(h => {
-      if (!cfg.enabled[h.key]) return;
-      let range = cfg.buffers[h.key];
-      if (h.key === 'housing') range = Math.max(range, 150);
-      if (h.key === 'settlement') range = Math.max(range, 600);
-      if (h.key === 'highway') range = Math.max(range, 300);
-      if (h.key === 'rail' || h.key === 'power') range = Math.max(range, 80);
-      if (h.key === 'water') range = Math.max(range, 50);
-      ranges[h.key] = range;
-    });
-
-    const xy = p => ({
-      x: (p.lon - cfg.lon) * 111320 * cosLat,
-      y: (p.lat - cfg.lat) * 111320
-    });
-    const cell = n => Math.floor(n / cellM);
-    const key = (x, y) => `${x},${y}`;
-
-    features.forEach(feature => {
-      if (!(feature.category in ranges) || ranges[feature.category] <= 0) return;
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      feature.points.forEach(point => {
-        const p = xy(point);
-        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-      });
-      let grid = grids.get(feature.category);
-      if (!grid) grids.set(feature.category, grid = new Map());
-      for (let cy = cell(minY); cy <= cell(maxY); cy++) {
-        for (let cx = cell(minX); cx <= cell(maxX); cx++) {
-          const k = key(cx, cy);
-          const bucket = grid.get(k);
-          if (bucket) bucket.push(feature);
-          else grid.set(k, [feature]);
-        }
-      }
-    });
-
-    return {
-      nearby(point) {
-        const p = xy(point);
-        const found = [];
-        const seen = new Set();
-        Object.entries(ranges).forEach(([category, range]) => {
-          if (range <= 0) return;
-          const grid = grids.get(category);
-          if (!grid) return;
-          const minCx = cell(p.x - range), maxCx = cell(p.x + range);
-          const minCy = cell(p.y - range), maxCy = cell(p.y + range);
-          for (let cy = minCy; cy <= maxCy; cy++) {
-            for (let cx = minCx; cx <= maxCx; cx++) {
-              const bucket = grid.get(key(cx, cy));
-              if (!bucket) continue;
-              bucket.forEach(feature => {
-                if (seen.has(feature.id)) return;
-                seen.add(feature.id);
-                found.push(feature);
-              });
-            }
-          }
-        });
-        return found;
-      }
-    };
-  }
-
-  function candidateGrid(cfg) {
-    const pts = [];
-    const stepKm = cfg.spacingM / 1000;
-    for (let y = -cfg.radiusKm; y <= cfg.radiusKm; y += stepKm) {
-      for (let x = -cfg.radiusKm; x <= cfg.radiusKm; x += stepKm) {
-        const lat = cfg.lat + (y / 111.32);
-        const lon = cfg.lon + (x / (111.32 * Math.max(0.2, Math.cos(cfg.lat * DEG))));
-        if (haversine(cfg.lat, cfg.lon, lat, lon) <= cfg.radiusKm) pts.push({ lat, lon });
-      }
-    }
-    return pts;
-  }
-
-  function scorePoint(p, cfg, features) {
-    const nearest = {
-      road: Infinity, highway: Infinity, power: Infinity, housing: Infinity,
-      settlement: Infinity, airport: Infinity, trees: Infinity, field: Infinity,
-      rail: Infinity, public: Infinity, water: Infinity
-    };
-    const inside = new Set();
-    for (const f of features) {
-      const d = distanceToFeatureM(p, f);
-      nearest[f.category] = Math.min(nearest[f.category] ?? Infinity, d);
-      if (d === 0 && f.isArea) inside.add(f.category);
-    }
-
-    const en = cfg.enabled;
-    const buf = cfg.buffers;
-    const hardRejects = [];
-    // Inside-area rejections (only for enabled hazards)
-    if (en.housing && inside.has('housing')) hardRejects.push('inside built-up land');
-    if (en.settlement && inside.has('settlement')) hardRejects.push('inside settlement');
-    if (en.airport && inside.has('airport')) hardRejects.push('inside airport area');
-    if (en.public && inside.has('public')) hardRejects.push('inside public/recreation area');
-    if (en.trees && inside.has('trees')) hardRejects.push('inside woodland');
-    if (en.water && inside.has('water')) hardRejects.push('inside open water');
-    // Proximity rejections
-    if (en.housing && nearest.housing < Math.max(150, buf.housing * 0.55)) hardRejects.push(`housing ${Math.round(nearest.housing)}m`);
-    if (en.settlement && nearest.settlement < Math.max(600, buf.settlement * 0.85)) hardRejects.push(`settlement ${Math.round(nearest.settlement)}m`);
-    if (en.airport && nearest.airport < buf.airport * 0.7) hardRejects.push(`airport ${Math.round(nearest.airport)}m`);
-    if (en.highway && nearest.highway < Math.max(300, buf.highway * 0.85)) hardRejects.push(`highway ${Math.round(nearest.highway)}m`);
-    if (en.rail && nearest.rail < Math.max(80, buf.rail * 0.55)) hardRejects.push(`rail ${Math.round(nearest.rail)}m`);
-    if (en.power && nearest.power < Math.max(80, buf.power * 0.5)) hardRejects.push(`power ${Math.round(nearest.power)}m`);
-    if (en.water && nearest.water < Math.max(50, buf.water * 0.5)) hardRejects.push(`water ${Math.round(nearest.water)}m`);
-    if (cfg.fieldPref === 'require' && nearest.field > 350) hardRejects.push('no open field nearby');
-    if (hardRejects.length) return { ...p, score: 0, nearest, risks: hardRejects, rejected: true };
-
-    let score = 100;
-    if (en.road) score -= penalty(nearest.road, buf.road, 18);
-    if (en.highway) score -= penalty(nearest.highway, buf.highway, 26);
-    if (en.power) score -= penalty(nearest.power, buf.power, 28);
-    if (en.housing) score -= penalty(nearest.housing, buf.housing, 35);
-    if (en.settlement) score -= penalty(nearest.settlement, buf.settlement, 42);
-    if (en.airport) score -= penalty(nearest.airport, buf.airport, 45);
-    if (en.trees) score -= penalty(nearest.trees, buf.trees, 18);
-    if (en.rail) score -= penalty(nearest.rail, buf.rail, 24);
-    if (en.public) score -= penalty(nearest.public, buf.public, 24);
-    if (en.water) score -= penalty(nearest.water, buf.water, 26);
-
-    if (cfg.fieldPref !== 'ignore') {
-      if (nearest.field < 180) score += 12;
-      else if (nearest.field < 350) score += 5;
-      else score -= 22;
-      if (nearest.field > 600) score = Math.min(score, 68);
-    }
-    if (en.airport && nearest.airport < buf.airport * 0.55) score -= 40;
-    if (en.housing && nearest.housing < buf.housing * 0.65) score = Math.min(score, 52);
-    if (en.settlement && nearest.settlement < buf.settlement) score = Math.min(score, 48);
-    score = Math.round(clamp(score, 0, 100));
-
-    const risks = [];
-    HAZARDS.forEach(h => {
-      if (!en[h.key]) return;
-      const d = nearest[h.key];
-      if (Number.isFinite(d) && d < buf[h.key]) risks.push(`${HAZARD_LABEL[h.key]} ${Math.round(d)}m`);
-    });
-    if (cfg.fieldPref !== 'ignore' && nearest.field > 350) risks.push('no mapped open field nearby');
-    if (!risks.length) risks.push(nearest.field < 180 ? 'open field nearby' : 'clear by map data');
-    return { ...p, score, nearest, risks, rejected: false };
-  }
-
-  function penalty(distM, bufferM, weight) {
-    if (!Number.isFinite(distM) || distM >= bufferM) return 0;
-    return weight * (1 - distM / bufferM);
-  }
-
-  function distanceToFeatureM(p, feature) {
-    if (feature.isArea && pointInPolygon(p, feature.points)) return 0;
-    let best = Infinity;
-    for (const q of feature.points) best = Math.min(best, haversine(p.lat, p.lon, q.lat, q.lon) * 1000);
-    if (feature.points.length > 1) {
-      const points = feature.points;
-      for (let i = 0; i < points.length - 1; i++) {
-        best = Math.min(best, distanceToSegmentM(p, points[i], points[i + 1]));
-      }
-      if (feature.isArea) best = Math.min(best, distanceToSegmentM(p, points[points.length - 1], points[0]));
-    }
-    return best;
-  }
-
-  function pointInPolygon(point, polygon) {
-    let inside = false;
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const xi = polygon[i].lon, yi = polygon[i].lat;
-      const xj = polygon[j].lon, yj = polygon[j].lat;
-      const intersect = ((yi > point.lat) !== (yj > point.lat)) &&
-        (point.lon < (xj - xi) * (point.lat - yi) / ((yj - yi) || 1e-12) + xi);
-      if (intersect) inside = !inside;
-    }
-    return inside;
-  }
-
-  function distanceToSegmentM(p, a, b) {
-    const cosLat = Math.max(0.2, Math.cos(p.lat * DEG));
-    const ax = (a.lon - p.lon) * 111320 * cosLat;
-    const ay = (a.lat - p.lat) * 111320;
-    const bx = (b.lon - p.lon) * 111320 * cosLat;
-    const by = (b.lat - p.lat) * 111320;
-    const vx = bx - ax, vy = by - ay;
-    const len2 = vx * vx + vy * vy;
-    if (!len2) return Math.sqrt(ax * ax + ay * ay);
-    const t = clamp((-(ax * vx + ay * vy)) / len2, 0, 1);
-    const x = ax + vx * t, y = ay + vy * t;
-    return Math.sqrt(x * x + y * y);
   }
 
   function renderMap(cfg, candidates, greenCandidates) {

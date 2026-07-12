@@ -53,7 +53,7 @@ const sseClients = new Map();
 const OWNER_TTL_MS = 15000;
 const pendingCommands = new Map();
 const pendingAuth = new Map();
-let sharedLaunch = { ownerId: null, ownerName: '', connected: false, status: null, countdown: null, updatedAt: Date.now() };
+let sharedLaunch = { ownerId: null, ownerName: '', connected: false, reconnecting: false, status: null, countdown: null, updatedAt: Date.now() };
 
 function ownerAlive() {
   return !!sharedLaunch.ownerId && Date.now() - sharedLaunch.updatedAt < OWNER_TTL_MS;
@@ -68,12 +68,13 @@ function emitLaunch(payload, targetClientId = null) {
 }
 
 function publicLaunchState() {
-  if (!ownerAlive() && sharedLaunch.connected) {
+  if (!ownerAlive() && (sharedLaunch.connected || sharedLaunch.ownerId)) {
     sharedLaunch = {
       ...sharedLaunch,
       ownerId: null,
       ownerName: '',
       connected: false,
+      reconnecting: false,
       status: null,
       countdown: null,
       updatedAt: Date.now()
@@ -157,7 +158,7 @@ function requireAuth(req, res, next) {
   if (!ownerAlive()) return next();
   // Live launch state is read-only and must remain available to camera devices.
   // Mutating command and recording routes below still require authorization.
-  if (['/health', '/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-stream', '/launch-event'].includes(req.path)) return next();
+  if (['/health', '/auth/status', '/auth/login', '/auth/owner', '/auth/owner/release', '/auth/result', '/launch-state', '/launch-stream', '/launch-event'].includes(req.path)) return next();
   const session = sessionFor(req);
   if (!session) return res.status(401).json({ error: 'launch_code_required' });
   req.launchSession = session;
@@ -174,6 +175,10 @@ process.on('unhandledRejection', err => {
 });
 
 app.use(express.json({ limit: '256kb' }));
+// The data directory (recording cache, upstream cache) lives under the web
+// root by default — never expose it through the static file server, since
+// recordings are only served through the authorized /api/recordings routes.
+app.use('/data', (req, res) => res.status(404).json({ error: 'not found' }));
 app.use(express.static(path.join(__dirname)));
 
 app.get('/api/auth/status', (req, res) => res.json({ authenticated: !!sessionFor(req), codeRequired: ownerAlive() }));
@@ -231,6 +236,24 @@ app.post('/api/auth/owner', (req, res) => {
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
   emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   res.json({ ok: true, state: publicLaunchState() });
+});
+// Explicit lease release (fetch keepalive or sendBeacon on pagehide) so other
+// devices can take over immediately instead of waiting out the owner TTL.
+app.post('/api/auth/owner/release', (req, res) => {
+  const clientId = String(req.body?.clientId || '');
+  if (!clientId || sharedLaunch.ownerId !== clientId) return res.json({ ok: true, ignored: true });
+  sharedLaunch = {
+    ...sharedLaunch,
+    ownerId: null,
+    ownerName: '',
+    connected: false,
+    reconnecting: false,
+    status: null,
+    countdown: null,
+    updatedAt: Date.now()
+  };
+  emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  res.json({ ok: true });
 });
 app.use('/api', requireAuth);
 
@@ -543,14 +566,14 @@ app.get('/api/aircraft', async (req, res) => {
 // commands through that owner in real time via Server-Sent Events.
 
 app.get('/api/launch-stream', (req, res) => {
+  const clientId = String(req.query.clientId || '');
+  if (!clientId) return res.status(400).json({ error: 'client_id_required' });
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
-  const clientId = String(req.query.clientId || '');
-  if (!clientId) return res.end();
   sseClients.set(res, { clientId });
   res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
   emitLaunch({ type: 'client_count', clients: sseClients.size });
@@ -617,11 +640,16 @@ app.post('/api/launch-event', (req, res) => {
     if (payload.connected && ownerAlive() && sharedLaunch.ownerId !== clientId) {
       return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
     }
+    // While the owner browser is auto-reconnecting to the controller it keeps
+    // its lease (heartbeats keep arriving with reconnecting: true) so a brief
+    // BLE blip doesn't bounce ownership between devices.
+    const keepLease = !payload.connected && payload.reconnecting === true && sharedLaunch.ownerId === clientId;
     sharedLaunch = {
       ...sharedLaunch,
-      ownerId: payload.connected ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
-      ownerName: payload.connected ? String(payload.deviceName || 'NeoLabs controller') : '',
+      ownerId: payload.connected || keepLease ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
+      ownerName: payload.connected || keepLease ? String(payload.deviceName || sharedLaunch.ownerName || 'NeoLabs controller') : '',
       connected: !!payload.connected,
+      reconnecting: keepLease,
       status: payload.connected ? (payload.status || sharedLaunch.status) : null,
       countdown: !payload.connected
         ? null
@@ -679,10 +707,15 @@ app.post('/api/launch-command', (req, res) => {
 });
 
 setInterval(() => {
-  if (!ownerAlive() && sharedLaunch.connected) emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  if (!ownerAlive() && (sharedLaunch.connected || sharedLaunch.ownerId)) emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   for (const [id, at] of pendingCommands) if (Date.now() - at > 15000) pendingCommands.delete(id);
   for (const [token, session] of sessions) if (session.expiresAt < Date.now()) sessions.delete(token);
 }, 2000).unref();
+
+// Application-level SSE heartbeat: clients use it as a liveness signal to
+// detect half-dead streams (the ':ping' comment lines are invisible to
+// EventSource, so they can't serve that purpose).
+setInterval(() => emitLaunch({ type: 'heartbeat' }), 10000).unref();
 
 // Unknown API routes get a clean JSON 404 instead of silently returning the
 // dashboard HTML (which would break client-side JSON parsing).

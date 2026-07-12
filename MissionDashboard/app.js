@@ -73,6 +73,17 @@ window.addEventListener('DOMContentLoaded', () => {
   // the loading overlay covering the dashboard indefinitely.
   setTimeout(hideLoader, 12000);
 
+  // Geolocation only exists in secure contexts (HTTPS or localhost). Phones
+  // opening the dashboard over plain LAN HTTP land here.
+  if (!navigator.geolocation?.getCurrentPosition) {
+    showErr('Location unavailable in this browser context (needs HTTPS or localhost) — using cached data.');
+    hydrateCachedLiveData(false);
+    renderAll();
+    startRenderRefreshOnly();
+    hideLoader();
+    return;
+  }
+
   navigator.geolocation.getCurrentPosition(
     async pos => {
       userLat = pos.coords.latitude;
@@ -84,8 +95,10 @@ window.addEventListener('DOMContentLoaded', () => {
       startAutoRefresh();
       hideLoader();
     },
-    () => {
-      showErr('Location access denied — please allow location and reload.');
+    err => {
+      showErr(err?.code === 1
+        ? 'Location access denied — please allow location and reload.'
+        : 'Could not get a GPS fix — using cached data. Check location services and reload to retry.');
       hydrateCachedLiveData(false);
       renderAll();
       startRenderRefreshOnly();

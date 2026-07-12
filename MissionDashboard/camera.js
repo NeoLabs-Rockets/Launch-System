@@ -212,7 +212,9 @@
       document.getElementById('cam-record').disabled = false;
       setStatus('Camera ready', selectedVideo.detail || 'Preview includes the recorded overlay.', selectedVideo.applied === false ? 'warn' : 'ok');
     } catch (err) {
-      setStatus('Camera unavailable', 'Allow camera permission or try another browser/device.', 'bad');
+      setStatus('Camera unavailable', navigator.mediaDevices
+        ? 'Allow camera permission or try another browser/device.'
+        : 'Camera access needs HTTPS or localhost — this page was opened over plain HTTP.', 'bad');
       setText('cam-audio-state', 'Unavailable');
     }
   }

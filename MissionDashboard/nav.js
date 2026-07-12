@@ -29,7 +29,13 @@
 
     VIEWS.forEach(v => {
       const sec = document.getElementById('view-' + v);
-      if (sec) sec.classList.toggle('active', v === view);
+      if (sec) {
+        sec.classList.toggle('active', v === view);
+        // Reveal immediately on activation — the scroll-reveal observer only
+        // fires once layout settles, which can leave a freshly shown view
+        // (display:none at load) invisible for a beat.
+        if (v === view) sec.classList.add('fx-in');
+      }
     });
     document.querySelectorAll('.top-nav a').forEach(a => {
       a.classList.toggle('active', a.dataset.view === view);
