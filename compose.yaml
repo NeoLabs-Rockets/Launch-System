@@ -1,0 +1,33 @@
+name: neolabs-rockets
+
+services:
+  mission-dashboard:
+    build:
+      context: ./MissionDashboard
+      dockerfile: Dockerfile
+    image: neolabs-rockets/mission-dashboard:local
+    container_name: neolabs-mission-dashboard
+    init: true
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3456
+      DATA_DIR: /app/data
+    ports:
+      - "${DASHBOARD_PORT:-3456}:3456"
+    volumes:
+      - mission-dashboard-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3456/api/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    stop_grace_period: 15s
+
+volumes:
+  mission-dashboard-data:

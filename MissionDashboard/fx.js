@@ -150,7 +150,7 @@
     const start = performance.now();
     const ease = p => 1 - Math.pow(1 - p, 3);
     function step(now) {
-      const p = Math.min(1, (now - start) / dur);
+      const p = Math.max(0, Math.min(1, (now - start) / dur));
       const v = from + (to - from) * ease(p);
       el.textContent = fmt(v);
       if (p < 1 && countupState.get(el) === to) requestAnimationFrame(step);

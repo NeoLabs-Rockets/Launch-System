@@ -72,7 +72,6 @@ void publishStatus() {
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer*, NimBLEConnInfo&) override {
     connectedCount++;
-    NimBLEDevice::getAdvertising()->start();
     publishStatus();
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
@@ -93,7 +92,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       publishStatus();
       return;
     }
-    if (cmd == "abort" || cmd == "disarm") { safeStop(cmd.c_str()); motorPulse(80); publishStatus(); return; }
+    if (cmd == "abort" || cmd == "disarm") { safeStop(""); motorPulse(80); publishStatus(); return; }
     if (cmd == "auth") {
       lastError = jsonString(body, "code") == LAUNCH_CODE ? "auth_ok" : "auth_failed";
       publishStatus();

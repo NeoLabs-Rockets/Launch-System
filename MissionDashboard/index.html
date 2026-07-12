@@ -87,12 +87,12 @@
       </div>
       <div class="launch-summary-grid">
         <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
-        <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Passcode protected</div></div>
+        <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
         <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
         <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">0</div><div class="s">BLE centrals on controller</div></div>
       </div>
       <button class="sp-save lc-open-btn" id="open-launch-dashboard" type="button">▲ Open Launch Console</button>
-      <div class="finder-note">Connect, complete the checklist, arm with the passcode, and run the countdown from the guided Launch Console. Active link loss during countdown forces a safe stop on the ESP32.</div>
+      <div class="finder-note">Connect, complete the checklist, arm, and run the countdown from the guided Launch Console. Additional devices join with the ESP32 launch code. Active link loss during countdown forces a safe stop.</div>
     </section>
   </section>
 
@@ -520,7 +520,7 @@
         <div id="lc-nogo-warn" class="lc-nogo-warn" style="display:none"></div>
         <div class="lc-metrics">
           <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div></div>
-          <div class="derived-item"><div class="k">Attempts left</div><div class="v" id="ble-attempts">-</div></div>
+          <div class="derived-item"><div class="k">Control path</div><div class="v" id="ble-control-mode">—</div></div>
         </div>
       </section>
 
@@ -682,10 +682,10 @@
 </aside>
 
 <script src="/fx.js" defer></script>
+<script src="/bluetooth.js" defer></script>
 <script src="/app.js" defer></script>
 <script src="/finder.js" defer></script>
 <script src="/camera.js" defer></script>
-<script src="/bluetooth.js" defer></script>
 <script src="/nav.js" defer></script>
 </body>
 </html>

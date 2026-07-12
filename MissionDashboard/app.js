@@ -315,6 +315,7 @@ async function reverseGeocode() {
 }
 
 async function refresh() {
+  await window.NeoAuthReady;
   if (userLat == null || userLon == null) {
     renderAll();
     return;

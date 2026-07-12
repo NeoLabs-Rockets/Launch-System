@@ -22,7 +22,9 @@ const fs = require('fs');
 }());
 
 const app = express();
-const PORT = 3456;
+const PORT = Math.min(65535, Math.max(1, Number(process.env.PORT) || 3456));
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const CACHE_FILE = path.join(DATA_DIR, 'upstream-cache.json');
 const AIRCRAFT_CACHE_TTL_MS = 30 * 1000;
 const AIRCRAFT_STALE_TTL_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = [200, 600, 1200];
@@ -39,9 +41,11 @@ const osmCache = new Map();
 const MAX_CACHE_ENTRIES = 200;
 const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
+const authFailures = new Map();
+let cachePersistTimer = null;
 
 // SSE clients for cross-device launch event relay
-const sseClients = new Set();
+const sseClients = new Map();
 const OWNER_TTL_MS = 7000;
 const pendingCommands = new Map();
 const pendingAuth = new Map();
@@ -51,9 +55,10 @@ function ownerAlive() {
   return !!sharedLaunch.ownerId && Date.now() - sharedLaunch.updatedAt < OWNER_TTL_MS;
 }
 
-function emitLaunch(payload) {
+function emitLaunch(payload, targetClientId = null) {
   const line = `data: ${JSON.stringify(payload)}\n\n`;
-  for (const client of sseClients) {
+  for (const [client, meta] of sseClients) {
+    if (targetClientId && meta.clientId !== targetClientId) continue;
     try { client.write(line); } catch (_) { sseClients.delete(client); }
   }
 }
@@ -75,7 +80,39 @@ function cacheSet(cache, key, value) {
     const oldest = cache.keys().next().value;
     cache.delete(oldest);
   }
+  scheduleCachePersist();
 }
+
+function loadPersistentCaches() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    for (const [key, value] of saved.aircraft || []) aircraftCache.set(key, value);
+    for (const [key, value] of saved.osm || []) osmCache.set(key, value);
+    console.log(`[cache] restored ${aircraftCache.size} aircraft and ${osmCache.size} OSM entries`);
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn('[cache] could not restore persistent cache:', err.message);
+  }
+}
+
+function persistCaches() {
+  cachePersistTimer = null;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const temp = `${CACHE_FILE}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify({ aircraft: [...aircraftCache], osm: [...osmCache] }));
+    fs.renameSync(temp, CACHE_FILE);
+  } catch (err) {
+    console.warn('[cache] could not persist cache:', err.message);
+  }
+}
+
+function scheduleCachePersist() {
+  if (cachePersistTimer) return;
+  cachePersistTimer = setTimeout(persistCaches, 1000);
+  cachePersistTimer.unref();
+}
+
+loadPersistentCaches();
 
 // Join sessions are granted only after the connected ESP32 validates the code.
 function parseCookies(req) {
@@ -90,7 +127,7 @@ function parseCookies(req) {
 function sessionFor(req) {
   const token = parseCookies(req).neolabs_session;
   const session = token && sessions.get(token);
-  if (!session || session.expiresAt < Date.now()) {
+  if (!session || session.expiresAt < Date.now() || (ownerAlive() && session.ownerId !== sharedLaunch.ownerId)) {
     if (token) sessions.delete(token);
     return null;
   }
@@ -100,7 +137,7 @@ function sessionFor(req) {
 
 function requireAuth(req, res, next) {
   if (!ownerAlive()) return next();
-  if (['/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-stream', '/launch-event'].includes(req.path)) return next();
+  if (['/health', '/auth/status', '/auth/login', '/auth/owner', '/auth/result', '/launch-state', '/launch-event'].includes(req.path)) return next();
   const session = sessionFor(req);
   if (!session) return res.status(401).json({ error: 'launch_code_required' });
   req.launchSession = session;
@@ -122,17 +159,28 @@ app.use(express.static(path.join(__dirname)));
 app.get('/api/auth/status', (req, res) => res.json({ authenticated: !!sessionFor(req), codeRequired: ownerAlive() }));
 app.post('/api/auth/login', async (req, res) => {
   if (!ownerAlive()) return res.json({ ok: true, codeRequired: false });
+  const authKey = req.ip || req.socket.remoteAddress || 'unknown';
+  const failure = authFailures.get(authKey);
+  if (failure && failure.until > Date.now() && failure.count >= 5) {
+    return res.status(429).json({ error: 'too_many_attempts', retryAfterMs: failure.until - Date.now() });
+  }
   const code = String(req.body?.code || '');
   if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: 'invalid_launch_code_format' });
   const requestId = crypto.randomUUID();
   const valid = await new Promise(resolve => {
     const timer = setTimeout(() => { pendingAuth.delete(requestId); resolve(false); }, 6000);
     pendingAuth.set(requestId, result => { clearTimeout(timer); pendingAuth.delete(requestId); resolve(result); });
-    emitLaunch({ type: 'auth_request', requestId, code, ownerId: sharedLaunch.ownerId });
+    emitLaunch({ type: 'auth_request', requestId, code, ownerId: sharedLaunch.ownerId }, sharedLaunch.ownerId);
   });
-  if (!valid) return res.status(401).json({ error: 'invalid_launch_code' });
+  if (!valid) {
+    const current = failure && failure.until > Date.now() ? failure : { count: 0, until: Date.now() + 60000 };
+    current.count++;
+    authFailures.set(authKey, current);
+    return res.status(401).json({ error: 'invalid_launch_code', attemptsLeft: Math.max(0, 5 - current.count) });
+  }
+  authFailures.delete(authKey);
   const token = crypto.randomBytes(32).toString('base64url');
-  sessions.set(token, { id: crypto.randomUUID(), expiresAt: Date.now() + AUTH_TTL_MS });
+  sessions.set(token, { id: crypto.randomUUID(), ownerId: sharedLaunch.ownerId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
   res.json({ ok: true });
 });
@@ -146,7 +194,7 @@ app.post('/api/auth/result', (req, res) => {
 app.post('/api/auth/owner', (req, res) => {
   if (!ownerAlive() || req.body?.clientId !== sharedLaunch.ownerId) return res.status(403).json({ error: 'not_ble_owner' });
   const token = crypto.randomBytes(32).toString('base64url');
-  sessions.set(token, { id: crypto.randomUUID(), expiresAt: Date.now() + AUTH_TTL_MS });
+  sessions.set(token, { id: crypto.randomUUID(), ownerId: sharedLaunch.ownerId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
   res.json({ ok: true });
 });
@@ -352,7 +400,9 @@ app.get('/api/launch-stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
-  sseClients.add(res);
+  const clientId = String(req.query.clientId || '');
+  if (!clientId) return res.end();
+  sseClients.set(res, { clientId, authorized: !!sessionFor(req) });
   res.write(`data: ${JSON.stringify({ type: 'shared_state', state: publicLaunchState() })}\n\n`);
   req.on('close', () => { sseClients.delete(res); clearInterval(keepAlive); });
 });
@@ -360,7 +410,12 @@ app.get('/api/launch-stream', (req, res) => {
 app.post('/api/launch-event', (req, res) => {
   const payload = req.body;
   if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'bad payload' });
-  if (payload.type === 'owner_heartbeat' || payload.type === 'ble_state') {
+  const ownershipEvent = payload.type === 'owner_heartbeat' || payload.type === 'ble_state';
+  const fromOwner = ownerAlive() && payload.clientId === sharedLaunch.ownerId;
+  if (!ownershipEvent && ownerAlive() && !fromOwner && !sessionFor(req)) {
+    return res.status(401).json({ error: 'launch_code_required' });
+  }
+  if (ownershipEvent) {
     const clientId = String(payload.clientId || '');
     if (!clientId) return res.status(400).json({ error: 'client_id_required' });
     if (!payload.connected && sharedLaunch.ownerId && sharedLaunch.ownerId !== clientId) {
@@ -369,6 +424,7 @@ app.post('/api/launch-event', (req, res) => {
     if (payload.connected && ownerAlive() && sharedLaunch.ownerId !== clientId) {
       return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
     }
+    const ownerWasAlive = ownerAlive();
     sharedLaunch = {
       ...sharedLaunch,
       ownerId: payload.connected ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
@@ -379,6 +435,16 @@ app.post('/api/launch-event', (req, res) => {
       updatedAt: Date.now()
     };
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+    if (!ownerWasAlive && payload.connected) {
+      setTimeout(() => {
+        for (const [client, meta] of sseClients) {
+          if (!meta.authorized && meta.clientId !== clientId) {
+            try { client.end(); } catch (_) {}
+            sseClients.delete(client);
+          }
+        }
+      }, 100);
+    }
   } else if (payload.type === 'command_result') {
     pendingCommands.delete(String(payload.commandId || ''));
     if (payload.status) sharedLaunch.status = payload.status;
@@ -398,7 +464,7 @@ app.post('/api/launch-command', (req, res) => {
   const allowed = new Set(['arm', 'disarm', 'countdown_start', 'abort']);
   const command = String(req.body?.command || '');
   if (!allowed.has(command)) return res.status(400).json({ error: 'invalid_command' });
-  const commandId = crypto.randomUUID();
+  const commandId = String(req.body?.commandId || crypto.randomUUID()).slice(0, 100);
   pendingCommands.set(commandId, Date.now());
   emitLaunch({ type: 'remote_command', commandId, command, args: req.body?.args || {}, ownerId: sharedLaunch.ownerId });
   res.status(202).json({ ok: true, commandId });
@@ -444,3 +510,14 @@ server.on('error', err => {
   }
   console.error('[server error]', err);
 });
+
+function shutdown(signal) {
+  console.log(`[shutdown] ${signal} received`);
+  if (cachePersistTimer) clearTimeout(cachePersistTimer);
+  persistCaches();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));

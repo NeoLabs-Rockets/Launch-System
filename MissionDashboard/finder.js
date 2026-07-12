@@ -182,6 +182,7 @@
     setStatus('Loading OSM safety data', 'Retrying public Overpass mirrors if needed.', 'warn');
     document.getElementById('lf-summary').textContent = 'Analyzing roads, power, settlements, airports, rail, trees, water, public areas, and open fields…';
     try {
+      await window.NeoAuthReady;
       const r = await fetch(`/api/osm-safety?lat=${cfg.lat.toFixed(5)}&lon=${cfg.lon.toFixed(5)}&radiusKm=${cfg.radiusKm}`);
       if (!r.ok) throw new Error(`OSM ${r.status}`);
       const osm = await r.json();
