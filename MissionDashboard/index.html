@@ -87,8 +87,6 @@
       </div>
       <div class="launch-summary-grid">
         <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
-        <div class="derived-item connection-quality" id="ds-server-quality-card"><div class="k">Server connection</div><div class="v" id="ds-server-quality">Checking…</div><div class="s" id="ds-server-latency">Measuring response time</div></div>
-        <div class="derived-item"><div class="k">Server GO / NO-GO</div><div class="v" id="ds-server-go">HOLD</div><div class="s" id="ds-server-go-sub">Connection check pending</div></div>
         <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
         <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
         <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards connected to server</div></div>
@@ -263,7 +261,7 @@
 <section class="view finder-page" id="view-finder">
   <div id="finder-banner" class="net-banner warn">
     <div><span class="net-dot"></span><span id="finder-status">Waiting for location</span></div>
-    <span id="finder-detail">OpenStreetMap safety data loads through the local reliability proxy.</span>
+    <span id="finder-detail"></span>
   </div>
 
   <section class="finder-layout">
@@ -311,7 +309,7 @@
       <div class="sp-sec">Safety Buffers (m)</div>
       <div class="sp-row">
         <div class="sp-field"><label for="lf-road">Roads</label><input id="lf-road" type="number" min="20" max="800" value="180"></div>
-        <div class="sp-field"><label for="lf-highway">Highways</label><input id="lf-highway" type="number" min="100" max="2000" value="600"></div>
+        <div class="sp-field"><label for="lf-highway">Highways</label><input id="lf-highway" type="number" min="100" max="10000" value="3000"></div>
       </div>
       <div class="sp-row">
         <div class="sp-field"><label for="lf-power">Power lines</label><input id="lf-power" type="number" min="50" max="1500" value="450"></div>
@@ -354,15 +352,13 @@
         </div>
       </div>
 
-      <div class="finder-note">Map scoring is a filter, not permission. Verify owner approval, local rules, NOTAMs, people, wind, fire risk, and the site in person.</div>
+      <div class="finder-note">Map scoring is a filter, not permission. Verify owner approval, local rules, NOTAMs, people, wind, fire risk, and the site in person. Check the official <a href="https://maptool-dipul.dfs.de/" target="_blank" rel="noopener">DIPUL drone map ↗</a> before every operation.</div>
     </aside>
 
     <section class="finder-map-wrap">
       <div id="finder-map"></div>
       <div class="finder-legend" id="finder-legend">
-        <span><i class="lg-good"></i> Best</span>
-        <span><i class="lg-warn"></i> Marginal</span>
-        <span><i class="lg-bad"></i> Avoid</span>
+        <span><i class="lg-good"></i> Suitable area</span>
       </div>
     </section>
   </section>
@@ -392,6 +388,7 @@
     <div class="camera-stage card">
       <video id="cam-source" playsinline muted></video>
       <canvas id="cam-canvas" width="1280" height="720"></canvas>
+      <canvas id="cam-green-canvas" width="1280" height="720" hidden aria-hidden="true"></canvas>
     </div>
 
     <aside class="card camera-controls">

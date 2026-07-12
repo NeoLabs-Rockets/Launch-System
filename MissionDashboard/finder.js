@@ -30,8 +30,7 @@
     public: 'public area', water: 'water'
   };
 
-  let map, centerMarker, candidateLayer, hazardLayer, searchLayer;
-  let currentFeatures = [];
+  let map, centerMarker, candidateLayer, searchLayer;
   let lastCandidates = [];
   let mapReady = false;
 
@@ -112,7 +111,6 @@
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
     candidateLayer = L.layerGroup().addTo(map);
-    hazardLayer = L.layerGroup().addTo(map);
     searchLayer = L.layerGroup().addTo(map);
     map.on('click', e => setCenter(e.latlng.lat, e.latlng.lng, true));
     mapReady = true;
@@ -179,21 +177,24 @@
     }
     if (!mapReady) initMap();
     setCenter(cfg.lat, cfg.lon, false);
-    setStatus('Loading OSM safety data', 'Retrying public Overpass mirrors if needed.', 'warn');
-    document.getElementById('lf-summary').textContent = 'Analyzing roads, power, settlements, airports, rail, trees, water, public areas, and open fields…';
+    setStatus('Analyzing area', '', 'warn');
+    document.getElementById('lf-summary').textContent = 'Analyzing area…';
     try {
       await window.NeoAuthReady;
-      const r = await fetch(`/api/osm-safety?lat=${cfg.lat.toFixed(5)}&lon=${cfg.lon.toFixed(5)}&radiusKm=${cfg.radiusKm}`);
+      const r = await fetch('/api/finder-analysis', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
+      });
+      // Migrate the former 600 m highway default to the new conservative value.
+      if (String(saved['lf-highway'] ?? '') === '600') document.getElementById('lf-highway').value = '3000';
       if (!r.ok) throw new Error(`OSM ${r.status}`);
       const osm = await r.json();
-      currentFeatures = normalizeFeatures(osm.elements || []);
-      const candidates = scoreCandidates(cfg, currentFeatures);
+      const candidates = osm.candidates || [];
       lastCandidates = candidates;
-      renderMap(cfg, candidates, currentFeatures);
-      renderFeatureCounts(currentFeatures);
+      renderMap(cfg, candidates, osm.green || []);
+      renderFeatureCounts(osm.featureCounts || {});
       renderResults(cfg, candidates, osm);
       setStatus(osm.cached ? 'Using cached OSM data' : 'Analysis complete',
-        `${currentFeatures.length} map features checked · ${candidates.length} candidates ranked.`, osm.cached ? 'warn' : 'ok');
+        `${osm.featureCount || 0} map features checked · ${candidates.length} candidates ranked.`, osm.cached ? 'warn' : 'ok');
     } catch (err) {
       setStatus('OSM data unavailable', 'Try a smaller radius or retry later.', 'bad');
       document.getElementById('lf-results-table').innerHTML =
@@ -255,7 +256,8 @@
 
   function scoreCandidates(cfg, features) {
     const grid = candidateGrid(cfg);
-    let scored = grid.map(p => scorePoint(p, cfg, features)).filter(c => !c.rejected && c.score >= cfg.minScore);
+    const featureIndex = buildFeatureIndex(cfg, features);
+    let scored = grid.map(p => scorePoint(p, cfg, featureIndex.nearby(p))).filter(c => !c.rejected && c.score >= cfg.minScore);
     if (cfg.sort === 'distance') {
       scored.sort((a, b) => haversine(cfg.lat, cfg.lon, a.lat, a.lon) - haversine(cfg.lat, cfg.lon, b.lat, b.lon));
     } else if (cfg.sort === 'field') {
@@ -264,6 +266,81 @@
       scored.sort((a, b) => b.score - a.score);
     }
     return scored.slice(0, cfg.results);
+  }
+
+  // Index feature bounding boxes into kilometre-sized cells. Previously every
+  // candidate walked every OSM feature (and all of its vertices), making large
+  // searches effectively O(candidates * map detail). The index limits exact
+  // geometry checks to features close enough to affect that category's score.
+  function buildFeatureIndex(cfg, features) {
+    const cellM = 1000;
+    const cosLat = Math.max(0.2, Math.cos(cfg.lat * DEG));
+    const grids = new Map();
+    const ranges = { field: cfg.fieldPref === 'ignore' ? 0 : 600 };
+    HAZARDS.forEach(h => {
+      if (!cfg.enabled[h.key]) return;
+      let range = cfg.buffers[h.key];
+      if (h.key === 'housing') range = Math.max(range, 150);
+      if (h.key === 'settlement') range = Math.max(range, 600);
+      if (h.key === 'highway') range = Math.max(range, 300);
+      if (h.key === 'rail' || h.key === 'power') range = Math.max(range, 80);
+      if (h.key === 'water') range = Math.max(range, 50);
+      ranges[h.key] = range;
+    });
+
+    const xy = p => ({
+      x: (p.lon - cfg.lon) * 111320 * cosLat,
+      y: (p.lat - cfg.lat) * 111320
+    });
+    const cell = n => Math.floor(n / cellM);
+    const key = (x, y) => `${x},${y}`;
+
+    features.forEach(feature => {
+      if (!(feature.category in ranges) || ranges[feature.category] <= 0) return;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      feature.points.forEach(point => {
+        const p = xy(point);
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      });
+      let grid = grids.get(feature.category);
+      if (!grid) grids.set(feature.category, grid = new Map());
+      for (let cy = cell(minY); cy <= cell(maxY); cy++) {
+        for (let cx = cell(minX); cx <= cell(maxX); cx++) {
+          const k = key(cx, cy);
+          const bucket = grid.get(k);
+          if (bucket) bucket.push(feature);
+          else grid.set(k, [feature]);
+        }
+      }
+    });
+
+    return {
+      nearby(point) {
+        const p = xy(point);
+        const found = [];
+        const seen = new Set();
+        Object.entries(ranges).forEach(([category, range]) => {
+          if (range <= 0) return;
+          const grid = grids.get(category);
+          if (!grid) return;
+          const minCx = cell(p.x - range), maxCx = cell(p.x + range);
+          const minCy = cell(p.y - range), maxCy = cell(p.y + range);
+          for (let cy = minCy; cy <= maxCy; cy++) {
+            for (let cx = minCx; cx <= maxCx; cx++) {
+              const bucket = grid.get(key(cx, cy));
+              if (!bucket) continue;
+              bucket.forEach(feature => {
+                if (seen.has(feature.id)) return;
+                seen.add(feature.id);
+                found.push(feature);
+              });
+            }
+          }
+        });
+        return found;
+      }
+    };
   }
 
   function candidateGrid(cfg) {
@@ -392,12 +469,15 @@
     return Math.sqrt(x * x + y * y);
   }
 
-  function renderMap(cfg, candidates, features) {
+  function renderMap(cfg, candidates, greenCandidates) {
     if (!map) return;
     candidateLayer.clearLayers();
-    hazardLayer.clearLayers();
     drawSearchRadius();
-    renderHazards(features);
+    greenCandidates.forEach(c => {
+      L.circle([c.lat, c.lon], {
+        radius: cfg.spacingM * 0.72, stroke: false, fillColor: '#36f0a0', fillOpacity: 0.28
+      }).addTo(candidateLayer);
+    });
     candidates.forEach((c, i) => {
       if (c.score < 78) return; // only plot green (safe) candidates
       L.circleMarker([c.lat, c.lon], {
@@ -418,21 +498,6 @@
     L.circle([lat, lon], { radius: radiusKm * 1000, color: '#4d9fff', fillColor: '#4d9fff', fillOpacity: 0.04, weight: 1 }).addTo(searchLayer);
   }
 
-  function renderHazards(features) {
-    const colors = Object.fromEntries(HAZARDS.map(h => [h.key, h.color]));
-    colors.field = '#2f8f5f';
-    features.filter(f => f.category !== 'field').slice(0, 800).forEach(f => {
-      const color = colors[f.category] || '#c9d6ef';
-      if (f.isArea && f.points.length > 2) {
-        L.polygon(f.points.map(p => [p.lat, p.lon]), { color, fillColor: color, fillOpacity: 0.08, weight: 2, opacity: 0.35 }).addTo(hazardLayer);
-      } else if (f.points.length > 1) {
-        L.polyline(f.points.map(p => [p.lat, p.lon]), { color, weight: 2, opacity: 0.35 }).addTo(hazardLayer);
-      } else {
-        L.circleMarker([f.points[0].lat, f.points[0].lon], { radius: 3, color, fillColor: color, fillOpacity: 0.45, weight: 1 }).addTo(hazardLayer);
-      }
-    });
-  }
-
   function candidatePopup(c, i) {
     const geUrl = `https://earth.google.com/web/@${c.lat.toFixed(5)},${c.lon.toFixed(5)},0a,500d,0h,0t,0r`;
     return `<b>#${i + 1} · score ${c.score}</b><br>${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}<br>${c.risks.join('<br>')}<br><a href="${geUrl}" target="_blank" rel="noopener">Open in Google Earth ↗</a>`;
@@ -442,8 +507,8 @@
     const card = document.getElementById('finder-feature-card');
     const wrap = document.getElementById('lf-feature-counts');
     if (!card || !wrap) return;
-    const counts = {};
-    features.forEach(f => { counts[f.category] = (counts[f.category] || 0) + 1; });
+    const counts = Array.isArray(features) ? {} : features;
+    if (Array.isArray(features)) features.forEach(f => { counts[f.category] = (counts[f.category] || 0) + 1; });
     const order = ['field', ...HAZARDS.map(h => h.key)];
     const chips = order.filter(k => counts[k]).map(k => {
       const label = k === 'field' ? 'open field' : HAZARD_LABEL[k];
@@ -456,7 +521,7 @@
   function renderResults(cfg, candidates, osm) {
     const summary = document.getElementById('lf-summary');
     const table = document.getElementById('lf-results-table');
-    summary.textContent = `${candidates.length} candidates above score ${cfg.minScore} · ${osm.cached ? 'cached OSM data' : 'fresh OSM data'} · ranked by ${cfg.sort}.`;
+    summary.textContent = `${candidates.length} green candidates (score ${Math.max(78, cfg.minScore)}+) · ${osm.cached ? 'cached OSM data' : 'fresh OSM data'} · ranked by ${cfg.sort}.`;
     if (!candidates.length) {
       table.innerHTML = '<div class="empty-state" style="color:var(--amber)">No candidates passed the current filters. Increase radius, relax buffers, or disable some hazards.</div>';
       return;

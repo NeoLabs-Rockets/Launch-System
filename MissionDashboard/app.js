@@ -226,12 +226,17 @@ function renderDataLink() {
   const retrying = states.includes('retrying');
   const cached = states.includes('cached') || states.includes('stale');
   const failed = states.includes('error') || !online;
+  const live = online && states.every(s => s === 'ok');
+
+  // A healthy connection needs no operator notification. Keep the banner for
+  // startup and degraded states only.
+  banner.style.display = live ? 'none' : '';
+  if (live) return;
 
   banner.className = 'net-banner ' + (failed ? 'bad' : cached || retrying ? 'warn' : 'ok');
   if (!online) title.textContent = 'Offline';
   else if (retrying) title.textContent = 'Retrying feeds';
   else if (cached) title.textContent = 'Using cached data';
-  else if (states.every(s => s === 'ok')) title.textContent = 'Live data link';
   else title.textContent = 'Data link starting';
 
   const parts = [];
@@ -366,9 +371,19 @@ async function fetchAircraft() {
     const result = await fetchJsonWithRetry(url, { timeoutMs: 7000 });
     const data = result.data;
     aircraft = normalizeAircraft(data.ac || []);
-    aircraftStatus = data.cached ? 'cached' : 'ok';
+    // The server keeps successful aircraft responses for 30 seconds to avoid
+    // hammering the upstream API. That is still fresh data, not a degraded
+    // fallback. Only stale cache responses should put the dashboard in a
+    // warning state.
+    const staleFallback = data.cached === true && data.cacheReason !== 'fresh-local';
+    aircraftStatus = staleFallback ? 'cached' : 'ok';
     aircraftLastUpdate = data.cachedAt ? new Date(data.cachedAt) : new Date();
-    setFeedState('aircraft', { status: aircraftStatus, attempts: result.attempts, lastError: null, source: data.cached ? 'cache' : 'network' });
+    setFeedState('aircraft', {
+      status: aircraftStatus,
+      attempts: result.attempts,
+      lastError: null,
+      source: data.cacheReason === 'fresh-local' ? 'server-cache' : staleFallback ? 'cache' : 'network'
+    });
     writeCache(AIRCRAFT_CACHE_KEY, {
       ts: aircraftLastUpdate.getTime(),
       lat: userLat,
@@ -1110,6 +1125,17 @@ function renderStatus() {
   const airspace = evaluateAirspace(model);
   factors.push({ id: 'airspace-corridor', n: 'Airspace Corridor', v: airspace.value, s: airspace.status });
 
+  const serverLink = window.NeoServerLink;
+  factors.push({
+    id: 'server-connection',
+    n: 'Server Connection',
+    v: serverLink
+      ? (serverLink.latency == null ? 'Server unavailable' : `${serverLink.quality} · ${serverLink.latency} ms`)
+      : 'Checking connection',
+    s: serverLink?.state || 'marginal',
+    locked: true
+  });
+
   const activeFactors = factors.filter(f => !ignoredFactors.has(f.id));
   const worst = activeFactors.reduce((w, f) =>
     f.s === 'nogo' ? 'nogo' : f.s === 'marginal' && w !== 'nogo' ? 'marginal' : w, 'go');
@@ -1122,7 +1148,7 @@ function renderStatus() {
     : worst === 'go' ? 'GO' : worst === 'marginal' ? 'HOLD' : 'NO-GO';
 
   document.getElementById('factors-list').innerHTML = factors.map(f => `
-    <div class="factor ${ignoredFactors.has(f.id) ? 'ignored' : ''}" data-factor-id="${escapeHtml(f.id)}" title="${ignoredFactors.has(f.id) ? 'Click to restore this factor' : 'Click to ignore this factor temporarily'}">
+    <div class="factor ${ignoredFactors.has(f.id) ? 'ignored' : ''}" data-factor-id="${escapeHtml(f.id)}" data-locked="${f.locked ? 'true' : 'false'}" title="${f.locked ? 'Live safety factor' : ignoredFactors.has(f.id) ? 'Click to restore this factor' : 'Click to ignore this factor temporarily'}">
       <span class="factor-name">${escapeHtml(f.n)}</span>
       <span class="factor-val">${escapeHtml(f.v)}</span>
       <span class="chip ${ignoredFactors.has(f.id) ? 'ignored' : f.s}">${ignoredFactors.has(f.id) ? 'IGNORED' : f.s === 'go' ? 'GO' : f.s === 'marginal' ? 'HOLD' : 'NO-GO'}</span>
@@ -1131,6 +1157,7 @@ function renderStatus() {
 
 function toggleIgnoredFactor(factorId) {
   if (!factorId) return;
+  if (factorId === 'server-connection') return;
   if (ignoredFactors.has(factorId)) ignoredFactors.delete(factorId);
   else ignoredFactors.add(factorId);
   renderStatus();

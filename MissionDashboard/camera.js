@@ -10,8 +10,15 @@
   let sourceStream = null;
   let audioStream = null;
   let mixedStream = null;
+  let greenMixedStream = null;
   let recorder = null;
+  let greenRecorder = null;
   let chunks = [];
+  let greenChunks = [];
+  let mainRecordingFinished = false;
+  let greenRecordingFinished = false;
+  let recordingCacheId = '';
+  let cacheUploadTasks = [];
   let drawFrameId = null;
   let recordStartedAt = 0;
   let durationTimer = null;
@@ -134,6 +141,8 @@
     cameraBleConnected = !!data.connected;
     cameraBleDeviceName = data.deviceName || '';
     setText('cam-ble-state', cameraBleConnected ? (cameraBleDeviceName || 'BLE live') : 'Offline');
+    // BLE and launch-stream state never owns the MediaRecorder lifecycle. Every
+    // device keeps capturing until its local Stop button is pressed.
   }
 
   function updateExternalCountdownLabel() {
@@ -200,9 +209,11 @@
 
   function resizeCanvas() {
     const q = quality();
-    const canvas = document.getElementById('cam-canvas');
-    canvas.width = q.width;
-    canvas.height = q.height;
+    ['cam-canvas', 'cam-green-canvas'].forEach(id => {
+      const canvas = document.getElementById(id);
+      canvas.width = q.width;
+      canvas.height = q.height;
+    });
   }
 
   function startDrawLoop() {
@@ -217,11 +228,19 @@
   function drawComposite() {
     const canvas = document.getElementById('cam-canvas');
     const ctx = canvas.getContext('2d');
+    const greenCanvas = document.getElementById('cam-green-canvas');
+    const greenCtx = greenCanvas.getContext('2d');
     const video = document.getElementById('cam-source');
     ctx.fillStyle = '#030713';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (video.readyState >= 2) drawCover(ctx, video, canvas.width, canvas.height);
     try { drawOverlay(ctx, canvas.width, canvas.height); } catch (_) {}
+
+    // Capture the same live HUD against a chroma-key background so editors can
+    // key the overlay over other footage without re-creating launch telemetry.
+    greenCtx.fillStyle = '#00ff00';
+    greenCtx.fillRect(0, 0, greenCanvas.width, greenCanvas.height);
+    try { drawOverlay(greenCtx, greenCanvas.width, greenCanvas.height, { greenScreen: true }); } catch (_) {}
   }
 
   function drawCover(ctx, video, width, height) {
@@ -234,7 +253,7 @@
   }
 
   // ── Cinematic broadcast overlay ──────────────────────────────────────────
-  function drawOverlay(ctx, w, h) {
+  function drawOverlay(ctx, w, h, options = {}) {
     const title = document.getElementById('cam-title').value || 'NeoLabs Launch';
     const site = document.getElementById('cam-site').value || 'Launch Site';
     const mission = document.getElementById('cam-mission').value || 'Flight Test';
@@ -252,17 +271,21 @@
     ctx.save();
     ctx.textBaseline = 'alphabetic';
 
-    // Vignette + scrims (top & bottom) for legibility
-    const topGrad = ctx.createLinearGradient(0, 0, 0, h * 0.22);
-    topGrad.addColorStop(0, 'rgba(3,7,19,.72)');
-    topGrad.addColorStop(1, 'rgba(3,7,19,0)');
-    ctx.fillStyle = topGrad;
-    ctx.fillRect(0, 0, w, h * 0.22);
-    const botGrad = ctx.createLinearGradient(0, h * 0.74, 0, h);
-    botGrad.addColorStop(0, 'rgba(3,7,19,0)');
-    botGrad.addColorStop(1, 'rgba(3,7,19,.82)');
-    ctx.fillStyle = botGrad;
-    ctx.fillRect(0, h * 0.74, w, h * 0.26);
+    // Preserve a uniform chroma field in the optional green-screen export.
+    // The HUD elements remain identical; only the full-width legibility scrims
+    // are omitted because they would contaminate most of the key color.
+    if (!options.greenScreen) {
+      const topGrad = ctx.createLinearGradient(0, 0, 0, h * 0.22);
+      topGrad.addColorStop(0, 'rgba(3,7,19,.72)');
+      topGrad.addColorStop(1, 'rgba(3,7,19,0)');
+      ctx.fillStyle = topGrad;
+      ctx.fillRect(0, 0, w, h * 0.22);
+      const botGrad = ctx.createLinearGradient(0, h * 0.74, 0, h);
+      botGrad.addColorStop(0, 'rgba(3,7,19,0)');
+      botGrad.addColorStop(1, 'rgba(3,7,19,.82)');
+      ctx.fillStyle = botGrad;
+      ctx.fillRect(0, h * 0.74, w, h * 0.26);
+    }
 
     // Corner brackets
     drawCorners(ctx, w, h, pad, accent, u);
@@ -283,7 +306,7 @@
     ctx.fillText(now.toLocaleTimeString(), w - pad, pad + Math.round(24 * u));
     const recBlink = rec && (Math.floor(Date.now() / 500) % 2 === 0);
     ctx.font = `800 ${Math.round(22 * u)}px system-ui, Segoe UI, Arial`;
-    ctx.fillStyle = rec ? '#ff4a3d' : '#36f0a0';
+    ctx.fillStyle = rec ? '#ff4a3d' : '#9fd4ff';
     const statusTxt = rec ? `REC ${fmtClock(elapsed)}` : 'STANDBY';
     ctx.fillText(statusTxt, w - pad, pad + Math.round(54 * u));
     if (rec) {
@@ -363,7 +386,7 @@
       ctx.fillText(`T+${formatCountdown(elapsedMs)}`, cx, cy + Math.round(22 * u));
       ctx.shadowBlur = 0;
       ctx.font = `700 ${Math.round(17 * u)}px system-ui, Segoe UI, Arial`;
-      ctx.fillStyle = '#36f0a0';
+      ctx.fillStyle = '#9fd4ff';
       ctx.fillText('ELAPSED', cx, cy + r + Math.round(28 * u));
     } else if (ms > 0) {
       ctx.font = `900 ${Math.round(80 * u)}px system-ui, Segoe UI, Arial`;
@@ -382,8 +405,8 @@
 
   function drawTelemetry(ctx, w, h, pad, u, ctx2) {
     const tiles = [];
-    tiles.push(['LINK', cameraBleConnected ? 'BLE LIVE' : 'OFFLINE', cameraBleConnected ? '#36f0a0' : '#ffb347']);
-    tiles.push(['AUDIO', audioStream ? 'MIC ON' : 'MIC OFF', audioStream ? '#36f0a0' : '#ffb347']);
+    tiles.push(['LINK', cameraBleConnected ? 'BLE LIVE' : 'OFFLINE', cameraBleConnected ? '#dbe7ff' : '#ffb347']);
+    tiles.push(['AUDIO', audioStream ? 'MIC ON' : 'MIC OFF', audioStream ? '#dbe7ff' : '#ffb347']);
 
     if (showTelemetry) {
       const wx = (typeof weather !== 'undefined' && weather) ? weather.current : null;
@@ -428,19 +451,47 @@
     if (!sourceStream) await openCamera();
     if (!sourceStream) return;
     const canvas = document.getElementById('cam-canvas');
+    const greenCanvas = document.getElementById('cam-green-canvas');
     const q = quality();
     const videoTrackStream = canvas.captureStream(q.fps);
+    const greenVideoTrackStream = greenCanvas.captureStream(q.fps);
     mixedStream = new MediaStream(videoTrackStream.getVideoTracks());
-    if (audioStream) audioStream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
+    greenMixedStream = new MediaStream(greenVideoTrackStream.getVideoTracks());
+    if (audioStream) audioStream.getAudioTracks().forEach(track => {
+      mixedStream.addTrack(track);
+      greenMixedStream.addTrack(track);
+    });
     ensureCountdownAudio();
-    countdownAudioDest?.stream.getAudioTracks().forEach(track => mixedStream.addTrack(track));
+    countdownAudioDest?.stream.getAudioTracks().forEach(track => {
+      mixedStream.addTrack(track);
+      greenMixedStream.addTrack(track);
+    });
 
     chunks = [];
+    greenChunks = [];
+    mainRecordingFinished = false;
+    greenRecordingFinished = false;
+    recordingCacheId = makeRecordingId();
+    cacheUploadTasks = [];
     const mimeType = preferredMimeType();
     recorder = new MediaRecorder(mixedStream, mimeType ? { mimeType, videoBitsPerSecond: 6_000_000 } : undefined);
-    recorder.ondataavailable = e => { if (e.data?.size) chunks.push(e.data); };
-    recorder.onstop = downloadRecording;
+    greenRecorder = new MediaRecorder(greenMixedStream, mimeType ? { mimeType, videoBitsPerSecond: 6_000_000 } : undefined);
+    recorder.ondataavailable = e => {
+      if (!e.data?.size) return;
+      const index = chunks.length;
+      chunks.push(e.data);
+      cacheUploadTasks.push(uploadRecordingChunk(recordingCacheId, 'main', index, e.data));
+    };
+    greenRecorder.ondataavailable = e => {
+      if (!e.data?.size) return;
+      const index = greenChunks.length;
+      greenChunks.push(e.data);
+      cacheUploadTasks.push(uploadRecordingChunk(recordingCacheId, 'green', index, e.data));
+    };
+    recorder.onstop = () => finishRecording('main');
+    greenRecorder.onstop = () => finishRecording('green');
     recorder.start(1000);
+    greenRecorder.start(1000);
     recordStartedAt = Date.now();
     document.getElementById('cam-record').disabled = true;
     document.getElementById('cam-stop').disabled = false;
@@ -456,6 +507,7 @@
 
   function stopRecording() {
     if (recorder?.state === 'recording') recorder.stop();
+    if (greenRecorder?.state === 'recording') greenRecorder.stop();
     clearInterval(durationTimer);
     externalCountdownActive = false;
     externalCountdownTotalMs = 0;
@@ -470,19 +522,115 @@
     setText('cam-duration', fmtClock(Math.floor((Date.now() - recordStartedAt) / 1000)));
   }
 
-  function downloadRecording() {
+  async function finishRecording(which) {
+    if (which === 'main') mainRecordingFinished = true;
+    if (which === 'green') greenRecordingFinished = true;
+    if (!mainRecordingFinished || !greenRecordingFinished) return;
     const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
-    const url = URL.createObjectURL(blob);
+    const greenBlob = new Blob(greenChunks, { type: greenRecorder.mimeType || 'video/webm' });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    setStatus('Securing recording', 'Uploading any video chunks missed while the connection was unavailable.', 'warn');
+
+    const cached = await finalizeBackendRecording();
+    const mainDownload = cached ? await fetchCachedRecording('main') : null;
+    downloadBlob(mainDownload || blob, `neolabs-launch-${stamp}.webm`);
+    if (mainDownload) await acknowledgeCachedRecording('main');
+    setText('cam-download', `${Math.round(blob.size / 1024 / 1024 * 10) / 10} MB`);
+    setStatus('Recording saved', cached
+      ? 'Main download started from the completed backend cache. A green-screen copy is ready.'
+      : 'Main download started locally. The incomplete backend cache was retained for recovery.', cached ? 'ok' : 'warn');
+
+    // Ask after the normal recording starts downloading, as this second file is
+    // optional and can be large at 1080p/60 fps.
+    if (window.confirm('Also download this recording with the same overlay over a green background?')) {
+      const greenDownload = cached ? await fetchCachedRecording('green') : null;
+      downloadBlob(greenDownload || greenBlob, `neolabs-launch-green-screen-${stamp}.webm`);
+      if (greenDownload) await acknowledgeCachedRecording('green');
+      setStatus('Recordings saved', cached
+        ? 'Both completed downloads started and the temporary backend cache was cleared.'
+        : 'Both local downloads started; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
+    } else {
+      if (cached) await acknowledgeCachedRecording('green');
+      setStatus('Recording saved', cached
+        ? 'Main download started. Green-screen copy skipped and the completed backend cache was cleared.'
+        : 'Main download started locally. Green-screen copy skipped; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
+    }
+  }
+
+  function makeRecordingId() {
+    if (crypto?.randomUUID) return crypto.randomUUID();
+    return `rec-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  async function uploadRecordingChunk(id, variant, index, blob) {
+    for (let attempt = 0; attempt < 15; attempt++) {
+      try {
+        const response = await fetch(`/api/recordings/${encodeURIComponent(id)}/${variant}/chunks/${index}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: blob
+        });
+        if (response.ok) return true;
+        if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) return false;
+      } catch (_) {}
+      await delay(Math.min(5000, 400 * (2 ** Math.min(attempt, 4))));
+    }
+    return false;
+  }
+
+  async function finalizeBackendRecording() {
+    const initialResults = await Promise.all(cacheUploadTasks);
+    if (initialResults.some(ok => !ok)) {
+      setStatus('Restoring connection', 'Retrying the complete recording cache from this device.', 'warn');
+      const retryTasks = [];
+      chunks.forEach((chunk, index) => retryTasks.push(uploadRecordingChunk(recordingCacheId, 'main', index, chunk)));
+      greenChunks.forEach((chunk, index) => retryTasks.push(uploadRecordingChunk(recordingCacheId, 'green', index, chunk)));
+      const retryResults = await Promise.all(retryTasks);
+      if (retryResults.some(ok => !ok)) return false;
+    }
+    try {
+      const response = await fetch(`/api/recordings/${encodeURIComponent(recordingCacheId)}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chunks: { main: chunks.length, green: greenChunks.length },
+          mimeType: recorder.mimeType || 'video/webm'
+        })
+      });
+      return response.ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function fetchCachedRecording(variant) {
+    try {
+      const response = await fetch(`/api/recordings/${encodeURIComponent(recordingCacheId)}/${variant}`, { cache: 'no-store' });
+      return response.ok ? await response.blob() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function acknowledgeCachedRecording(variant) {
+    try {
+      await fetch(`/api/recordings/${encodeURIComponent(recordingCacheId)}/${variant}`, { method: 'DELETE' });
+    } catch (_) {}
+  }
+
+  function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `neolabs-launch-${stamp}.webm`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
-    setText('cam-download', `${Math.round(blob.size / 1024 / 1024 * 10) / 10} MB`);
-    setStatus('Recording saved', 'Download started. Keep the file with your launch notes.', 'ok');
   }
 
   function fmtClock(totalSeconds) {
@@ -569,12 +717,13 @@
 
   function stopStreams() {
     cancelAnimationFrame(drawFrameId);
-    [sourceStream, audioStream, mixedStream].forEach(stream => {
+    [sourceStream, audioStream, mixedStream, greenMixedStream].forEach(stream => {
       stream?.getTracks().forEach(track => track.stop());
     });
     sourceStream = null;
     audioStream = null;
     mixedStream = null;
+    greenMixedStream = null;
     countdownAudioDest = null;
     document.getElementById('cam-record').disabled = true;
     document.getElementById('cam-stop').disabled = true;

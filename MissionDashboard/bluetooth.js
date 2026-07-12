@@ -804,16 +804,8 @@ function renderServerLink() {
   const detail = serverLink.latency == null
     ? 'Server not responding'
     : `${serverLink.latency} ms response time`;
-  setText('ds-server-quality', quality);
-  setText('ds-server-latency', detail);
-  setText('ds-server-go', serverLink.state === 'nogo' ? 'NO-GO' : serverLink.state === 'go' ? 'GO' : 'HOLD');
-  setText('ds-server-go-sub', serverLink.state === 'nogo' ? 'Connection too slow or unavailable' : serverLink.state === 'go' ? 'Server link within limits' : 'Elevated latency — monitor');
-  ['ds-server-quality', 'ds-server-go'].forEach(id => {
-    const node = el(id);
-    if (node) node.className = `v ${serverLink.state}`;
-  });
-  const card = el('ds-server-quality-card');
-  if (card) card.className = `derived-item connection-quality ${serverLink.state}`;
+  window.NeoServerLink = { ...serverLink, quality, detail };
+  if (typeof renderStatus === 'function') renderStatus();
 }
 
 function formatControllerError(error) {

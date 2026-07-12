@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const fs = require('fs');
+const finderEngine = require('./finder-engine');
 
 // Minimal .env loader — no extra dependency needed.
 // Lines starting with # are comments; existing env vars take precedence.
@@ -25,10 +26,11 @@ const app = express();
 const PORT = Math.min(65535, Math.max(1, Number(process.env.PORT) || 3456));
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CACHE_FILE = path.join(DATA_DIR, 'upstream-cache.json');
+const RECORDING_CACHE_DIR = path.join(DATA_DIR, 'recording-cache');
 const AIRCRAFT_CACHE_TTL_MS = 30 * 1000;
 const AIRCRAFT_STALE_TTL_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = [200, 600, 1200];
-const OVERPASS_CACHE_TTL_MS = 2 * 60 * 1000;
+const OVERPASS_CACHE_TTL_MS = 15 * 60 * 1000;
 const OVERPASS_STALE_TTL_MS = 60 * 60 * 1000;
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -199,6 +201,120 @@ app.post('/api/auth/owner', (req, res) => {
   res.json({ ok: true });
 });
 app.use('/api', requireAuth);
+
+// ── Resilient camera recording cache ──────────────────────────────────────
+// Every authorized dashboard (BLE owner or client) can spool MediaRecorder
+// chunks here. Files are intentionally removed only after the browser has
+// fetched every byte of each completed variant and explicitly acknowledges it.
+function safeRecordingId(value) {
+  const id = String(value || '');
+  return /^[a-zA-Z0-9_-]{12,100}$/.test(id) ? id : null;
+}
+
+function recordingPaths(id, variant) {
+  const dir = path.join(RECORDING_CACHE_DIR, id, variant);
+  return { dir, manifest: path.join(RECORDING_CACHE_DIR, id, 'manifest.json') };
+}
+
+app.put('/api/recordings/:id/:variant/chunks/:index', express.raw({ type: 'application/octet-stream', limit: '20mb' }), (req, res) => {
+  const id = safeRecordingId(req.params.id);
+  const variant = ['main', 'green'].includes(req.params.variant) ? req.params.variant : null;
+  const index = Number(req.params.index);
+  if (!id || !variant || !Number.isSafeInteger(index) || index < 0 || index > 100000) {
+    return res.status(400).json({ error: 'invalid_recording_chunk' });
+  }
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'empty_chunk' });
+  try {
+    const { dir } = recordingPaths(id, variant);
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, `${String(index).padStart(6, '0')}.part`);
+    const temp = `${target}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(temp, req.body);
+    fs.renameSync(temp, target);
+    res.json({ ok: true, index, bytes: req.body.length });
+  } catch (error) {
+    console.error('[recording-cache] chunk write failed:', error);
+    res.status(500).json({ error: 'chunk_write_failed' });
+  }
+});
+
+app.post('/api/recordings/:id/complete', (req, res) => {
+  const id = safeRecordingId(req.params.id);
+  const counts = req.body?.chunks || {};
+  if (!id || !Number.isSafeInteger(counts.main) || !Number.isSafeInteger(counts.green) || counts.main < 1 || counts.green < 1) {
+    return res.status(400).json({ error: 'invalid_recording_manifest' });
+  }
+  try {
+    const variants = {};
+    for (const variant of ['main', 'green']) {
+      const { dir } = recordingPaths(id, variant);
+      const files = Array.from({ length: counts[variant] }, (_, i) => path.join(dir, `${String(i).padStart(6, '0')}.part`));
+      const missing = files.find(file => !fs.existsSync(file));
+      if (missing) return res.status(409).json({ error: 'chunks_missing', variant });
+      variants[variant] = {
+        chunks: counts[variant],
+        bytes: files.reduce((total, file) => total + fs.statSync(file).size, 0),
+        acknowledged: false
+      };
+    }
+    const manifest = {
+      id,
+      completedAt: new Date().toISOString(),
+      mimeType: String(req.body?.mimeType || 'video/webm').slice(0, 100),
+      variants
+    };
+    const { manifest: manifestFile } = recordingPaths(id, 'main');
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+    res.json({ ok: true, recording: manifest });
+  } catch (error) {
+    console.error('[recording-cache] finalize failed:', error);
+    res.status(500).json({ error: 'recording_finalize_failed' });
+  }
+});
+
+app.get('/api/recordings/:id/:variant', async (req, res) => {
+  const id = safeRecordingId(req.params.id);
+  const variant = ['main', 'green'].includes(req.params.variant) ? req.params.variant : null;
+  if (!id || !variant) return res.status(400).json({ error: 'invalid_recording' });
+  try {
+    const paths = recordingPaths(id, variant);
+    const manifest = JSON.parse(fs.readFileSync(paths.manifest, 'utf8'));
+    const info = manifest.variants?.[variant];
+    if (!info) return res.status(404).json({ error: 'recording_not_complete' });
+    res.setHeader('Content-Type', manifest.mimeType || 'video/webm');
+    res.setHeader('Content-Length', info.bytes);
+    res.setHeader('Cache-Control', 'no-store');
+    for (let i = 0; i < info.chunks; i++) {
+      const file = path.join(paths.dir, `${String(i).padStart(6, '0')}.part`);
+      for await (const chunk of fs.createReadStream(file)) {
+        if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve));
+      }
+    }
+    res.end();
+  } catch (error) {
+    if (!res.headersSent) res.status(error.code === 'ENOENT' ? 404 : 500).json({ error: 'recording_read_failed' });
+    else res.destroy(error);
+  }
+});
+
+app.delete('/api/recordings/:id/:variant', (req, res) => {
+  const id = safeRecordingId(req.params.id);
+  const variant = ['main', 'green'].includes(req.params.variant) ? req.params.variant : null;
+  if (!id || !variant) return res.status(400).json({ error: 'invalid_recording' });
+  try {
+    const paths = recordingPaths(id, variant);
+    const manifest = JSON.parse(fs.readFileSync(paths.manifest, 'utf8'));
+    if (!manifest.variants?.[variant]) return res.status(409).json({ error: 'recording_not_complete' });
+    fs.rmSync(paths.dir, { recursive: true, force: true });
+    manifest.variants[variant].acknowledged = true;
+    const allAcknowledged = Object.values(manifest.variants).every(item => item.acknowledged);
+    if (allAcknowledged) fs.rmSync(path.join(RECORDING_CACHE_DIR, id), { recursive: true, force: true });
+    else fs.writeFileSync(paths.manifest, JSON.stringify(manifest));
+    res.json({ ok: true, cacheDeleted: variant, recordingDeleted: allAcknowledged });
+  } catch (error) {
+    res.status(error.code === 'ENOENT' ? 404 : 500).json({ error: 'recording_cleanup_failed' });
+  }
+});
 
 // Proxy aircraft API — browser can't call adsb.fi directly (CORS)
 function sleep(ms) {
@@ -410,6 +526,45 @@ app.get('/api/launch-stream', (req, res) => {
     clearInterval(keepAlive);
     emitLaunch({ type: 'client_count', clients: sseClients.size });
   });
+});
+
+app.post('/api/finder-analysis', async (req, res) => {
+  const raw = req.body || {};
+  const lat = Number(raw.lat), lon = Number(raw.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: 'lat and lon required' });
+  const radiusKm = Math.min(15, Math.max(1, Number(raw.radiusKm) || 5));
+  const cfg = {
+    lat, lon, radiusKm,
+    spacingM: Math.min(1000, Math.max(120, Number(raw.spacingM) || 300)),
+    minScore: Math.min(100, Math.max(0, Number(raw.minScore) || 0)),
+    results: Math.min(60, Math.max(5, Number(raw.results) || 15)),
+    sort: ['score', 'distance', 'field'].includes(raw.sort) ? raw.sort : 'score',
+    fieldPref: ['prefer', 'require', 'ignore'].includes(raw.fieldPref) ? raw.fieldPref : 'prefer',
+    enabled: {}, buffers: {}
+  };
+  const keys = ['road', 'highway', 'power', 'housing', 'settlement', 'rail', 'airport', 'trees', 'public', 'water'];
+  for (const key of keys) {
+    cfg.enabled[key] = raw.enabled?.[key] !== false;
+    cfg.buffers[key] = Math.min(12000, Math.max(10, Number(raw.buffers?.[key]) || 10));
+  }
+  const cacheKey = osmCacheKey(lat, lon, radiusKm);
+  let entry = osmCache.get(cacheKey), cached = false;
+  try {
+    if (!entry || Date.now() - entry.ts >= OVERPASS_CACHE_TTL_MS) {
+      const data = await fetchOverpassWithRetry(overpassQuery(lat, lon, radiusKm));
+      entry = { ts: Date.now(), data };
+      cacheSet(osmCache, cacheKey, entry);
+    } else cached = true;
+  } catch (error) {
+    if (!entry || Date.now() - entry.ts >= OVERPASS_STALE_TTL_MS) return res.status(502).json({ error: error.message || 'overpass unavailable' });
+    cached = true;
+  }
+  try {
+    res.json({ ...finderEngine.analyze(cfg, entry.data.elements || []), cached });
+  } catch (error) {
+    console.error('[finder]', error);
+    res.status(500).json({ error: 'finder analysis failed' });
+  }
 });
 
 app.post('/api/launch-event', (req, res) => {

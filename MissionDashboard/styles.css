@@ -424,13 +424,16 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 @media(max-width:760px){.hdr-launch{display:none}}
 
 /* ───────────────────── Dashboard launch summary ───────────────────── */
-.launch-summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:6px 0 16px}
-.connection-quality.go{border-color:rgba(54,240,160,.35)}
-.connection-quality.marginal{border-color:rgba(255,179,71,.38)}
-.connection-quality.nogo{border-color:rgba(255,74,61,.42)}
-#ds-server-quality.go,#ds-server-go.go{color:var(--green)}
-#ds-server-quality.marginal,#ds-server-go.marginal{color:var(--amber)}
-#ds-server-quality.nogo,#ds-server-go.nogo{color:var(--red)}
+.launch-summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:4px 0 10px}
+#launch-summary-card{padding:16px 18px}
+#launch-summary-card .card-head{margin-bottom:10px}
+#launch-summary-card .go-badge{width:82px;height:82px;border-width:2px;animation:none}
+#launch-summary-card .go-label{font-size:.9em}
+#launch-summary-card .derived-item{padding:9px 11px;min-height:0}
+#launch-summary-card .derived-item .v{font-size:1em;margin-top:3px}
+#launch-summary-card .derived-item .s{font-size:.64em;margin-top:3px}
+#launch-summary-card .lc-open-btn{padding:9px;margin-bottom:8px}
+#launch-summary-card .finder-note{padding:8px 10px;font-size:.68em}
 .lc-open-btn{width:100%;margin-top:4px;margin-bottom:12px}
 @media(max-width:760px){.launch-summary-grid{grid-template-columns:1fr 1fr}}
 
