@@ -10,6 +10,8 @@
 
 [🚀 Mission Dashboard](#mission-dashboard) · [🛰️ Launch System](#launch-system)
 
+[Compatible with NeoLabs-Rockets launch platform](https://github.com/NeoLabs-Rockets/Launch-Platform)
+
 ---
 
 </div>
