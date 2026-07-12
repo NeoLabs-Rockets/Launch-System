@@ -48,7 +48,9 @@ let cachePersistTimer = null;
 
 // SSE clients for cross-device launch event relay
 const sseClients = new Map();
-const OWNER_TTL_MS = 7000;
+// The ESP32 enforces the tight physical safety timeout. This longer lease only
+// prevents remote-server latency from making the web owner flap unnecessarily.
+const OWNER_TTL_MS = 15000;
 const pendingCommands = new Map();
 const pendingAuth = new Map();
 let sharedLaunch = { ownerId: null, ownerName: '', connected: false, status: null, countdown: null, updatedAt: Date.now() };
@@ -58,7 +60,7 @@ function ownerAlive() {
 }
 
 function emitLaunch(payload, targetClientId = null) {
-  const line = `data: ${JSON.stringify(payload)}\n\n`;
+  const line = `data: ${JSON.stringify({ ...payload, serverAt: Date.now() })}\n\n`;
   for (const [client, meta] of sseClients) {
     if (targetClientId && meta.clientId !== targetClientId) continue;
     try { client.write(line); } catch (_) { sseClients.delete(client); }
@@ -67,9 +69,23 @@ function emitLaunch(payload, targetClientId = null) {
 
 function publicLaunchState() {
   if (!ownerAlive() && sharedLaunch.connected) {
-    sharedLaunch = { ...sharedLaunch, ownerId: null, connected: false, updatedAt: Date.now() };
+    sharedLaunch = {
+      ...sharedLaunch,
+      ownerId: null,
+      ownerName: '',
+      connected: false,
+      status: null,
+      countdown: null,
+      updatedAt: Date.now()
+    };
   }
-  return { ...sharedLaunch, ownerId: undefined, ownerActive: ownerAlive(), viewers: sseClients.size };
+  const countdown = sharedLaunch.countdown?.active
+    ? {
+        ...sharedLaunch.countdown,
+        remainingMs: Math.max(0, Number(sharedLaunch.countdown.endsAtServer || 0) - Date.now())
+      }
+    : sharedLaunch.countdown;
+  return { ...sharedLaunch, countdown, ownerId: undefined, ownerActive: ownerAlive(), viewers: sseClients.size, serverAt: Date.now() };
 }
 
 // Keep the in-memory caches bounded so a long-running controller never leaks
@@ -194,12 +210,39 @@ app.post('/api/auth/result', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/auth/owner', (req, res) => {
-  if (!ownerAlive() || req.body?.clientId !== sharedLaunch.ownerId) return res.status(403).json({ error: 'not_ble_owner' });
+  const clientId = String(req.body?.clientId || '');
+  if (!clientId) return res.status(400).json({ error: 'client_id_required' });
+  if (ownerAlive() && sharedLaunch.ownerId !== clientId) {
+    return res.status(409).json({ error: 'ble_owner_exists', state: publicLaunchState() });
+  }
+  const ownerWasAlive = ownerAlive();
+  sharedLaunch = {
+    ...sharedLaunch,
+    ownerId: clientId,
+    ownerName: String(req.body?.deviceName || sharedLaunch.ownerName || 'NeoLabs controller'),
+    connected: true,
+    status: req.body?.status || sharedLaunch.status,
+    countdown: { active: false, endsAtServer: null, left: 0 },
+    updatedAt: Date.now()
+  };
   const token = crypto.randomBytes(32).toString('base64url');
-  sessions.set(token, { id: crypto.randomUUID(), ownerId: sharedLaunch.ownerId, expiresAt: Date.now() + AUTH_TTL_MS });
+  sessions.set(token, { id: crypto.randomUUID(), ownerId: clientId, expiresAt: Date.now() + AUTH_TTL_MS });
   res.setHeader('Set-Cookie', `neolabs_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_TTL_MS / 1000}`);
-  res.json({ ok: true });
+  emitLaunch({ type: 'shared_state', state: publicLaunchState() });
+  if (!ownerWasAlive) evictUnauthorizedViewers(clientId);
+  res.json({ ok: true, state: publicLaunchState() });
 });
+
+function evictUnauthorizedViewers(ownerId) {
+  setTimeout(() => {
+    for (const [client, meta] of sseClients) {
+      if (!meta.authorized && meta.clientId !== ownerId) {
+        try { client.end(); } catch (_) {}
+        sseClients.delete(client);
+      }
+    }
+  }, 100);
+}
 app.use('/api', requireAuth);
 
 // ── Resilient camera recording cache ──────────────────────────────────────
@@ -512,8 +555,9 @@ app.get('/api/aircraft', async (req, res) => {
 
 app.get('/api/launch-stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch (_) {} }, 20000);
   const clientId = String(req.query.clientId || '');
@@ -590,29 +634,46 @@ app.post('/api/launch-event', (req, res) => {
       ownerId: payload.connected ? clientId : (sharedLaunch.ownerId === clientId ? null : sharedLaunch.ownerId),
       ownerName: payload.connected ? String(payload.deviceName || 'NeoLabs controller') : '',
       connected: !!payload.connected,
-      status: payload.status || sharedLaunch.status,
-      countdown: payload.countdown ?? sharedLaunch.countdown,
+      status: payload.connected ? (payload.status || sharedLaunch.status) : null,
+      countdown: !payload.connected
+        ? null
+        : payload.countdown?.active
+        ? {
+            ...payload.countdown,
+            endsAtServer: Date.now() + Math.max(0, Number(payload.countdown.leftMs) || Number(payload.countdown.left) * 1000 || Math.max(0, Number(payload.countdown.endsAt) - Date.now()))
+          }
+        : (payload.countdown ?? sharedLaunch.countdown),
       updatedAt: Date.now()
     };
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
-    if (!ownerWasAlive && payload.connected) {
-      setTimeout(() => {
-        for (const [client, meta] of sseClients) {
-          if (!meta.authorized && meta.clientId !== clientId) {
-            try { client.end(); } catch (_) {}
-            sseClients.delete(client);
-          }
-        }
-      }, 100);
-    }
+    if (!ownerWasAlive && payload.connected) evictUnauthorizedViewers(clientId);
   } else if (payload.type === 'command_result') {
+    if (!fromOwner) return res.status(403).json({ error: 'owner_event_required' });
     pendingCommands.delete(String(payload.commandId || ''));
     if (payload.status) sharedLaunch.status = payload.status;
     sharedLaunch.updatedAt = Date.now();
     emitLaunch(payload);
     emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   } else {
-    emitLaunch(payload);
+    if (ownerAlive() && !fromOwner) return res.status(403).json({ error: 'owner_event_required' });
+    if (payload.type === 'countdown_start' || payload.type === 'countdown_tick') {
+      const remainingMs = Number.isFinite(Number(payload.leftMs))
+        ? Math.max(0, Number(payload.leftMs))
+        : Math.max(0, Number(payload.left || payload.seconds || 0) * 1000);
+      sharedLaunch.countdown = {
+        active: true,
+        endsAtServer: Date.now() + remainingMs,
+        left: Number.isFinite(Number(payload.left)) ? Number(payload.left) : null,
+        remainingMs
+      };
+    } else if (payload.type === 'abort' || payload.type === 'ignition') {
+      sharedLaunch.countdown = { active: false, endsAt: null, left: 0 };
+    }
+    sharedLaunch.updatedAt = Date.now();
+    emitLaunch(sharedLaunch.countdown?.active
+      ? { ...payload, remainingMs: Math.max(0, sharedLaunch.countdown.endsAtServer - Date.now()) }
+      : payload);
+    emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   }
   res.json({ ok: true, clients: sseClients.size });
 });

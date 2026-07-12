@@ -29,6 +29,7 @@
   let ignitionAt = 0;
   let syncOffsetMs = 0;
   let cameraBleConnected = false;
+  let cameraBleShared = false;
   let cameraBleDeviceName = '';
   let countdownAudioCtx = null;
   let countdownAudioDest = null;
@@ -111,13 +112,19 @@
     if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
     if (data.type === 'countdown_start') {
       lastCountdownSpoken = null;
-      externalCountdownTotalMs = Math.max(1000, (data.seconds || 0) * 1000 || (data.endsAt ? data.endsAt - Date.now() : 1000));
-      externalCountdownBaseEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || data.seconds || 0) * 1000);
+      const remainingMs = syncedRemainingMs(data);
+      externalCountdownTotalMs = Math.max(1000, (data.seconds || 0) * 1000 || remainingMs || 1000);
+      externalCountdownBaseEndsAt = Number.isFinite(remainingMs)
+        ? Date.now() + Math.max(0, remainingMs)
+        : (data.endsAt || (Date.now() + Math.max(0, data.left || data.seconds || 0) * 1000));
       externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
       externalCountdownActive = true;
       updateExternalCountdownLabel();
     } else if (data.type === 'countdown_tick') {
-      externalCountdownBaseEndsAt = data.endsAt || (Date.now() + Math.max(0, data.left || 0) * 1000);
+      const remainingMs = syncedRemainingMs(data);
+      externalCountdownBaseEndsAt = Number.isFinite(remainingMs)
+        ? Date.now() + Math.max(0, remainingMs)
+        : (data.endsAt || (Date.now() + Math.max(0, data.left || 0) * 1000));
       externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
       if (!externalCountdownTotalMs) externalCountdownTotalMs = Math.max(1000, externalCountdownEndsAt - Date.now());
       externalCountdownActive = true;
@@ -138,9 +145,13 @@
 
   function applyBleState(data) {
     if (!data) return;
+    if (data.type === 'shared_state') data = data.state || {};
     cameraBleConnected = !!data.connected;
+    cameraBleShared = cameraBleConnected && !!data.shared;
     cameraBleDeviceName = data.deviceName || '';
-    setText('cam-ble-state', cameraBleConnected ? (cameraBleDeviceName || 'BLE live') : 'Offline');
+    setText('cam-ble-state', cameraBleConnected
+      ? `${cameraBleShared ? 'Shared BLE' : 'Direct BLE'}${cameraBleDeviceName ? ` · ${cameraBleDeviceName}` : ''}`
+      : 'Offline');
     // BLE and launch-stream state never owns the MediaRecorder lifecycle. Every
     // device keeps capturing until its local Stop button is pressed.
   }
@@ -405,7 +416,7 @@
 
   function drawTelemetry(ctx, w, h, pad, u, ctx2) {
     const tiles = [];
-    tiles.push(['LINK', cameraBleConnected ? 'BLE LIVE' : 'OFFLINE', cameraBleConnected ? '#dbe7ff' : '#ffb347']);
+    tiles.push(['LINK', cameraBleConnected ? (cameraBleShared ? 'SHARED BLE' : 'DIRECT BLE') : 'OFFLINE', cameraBleConnected ? '#dbe7ff' : '#ffb347']);
     tiles.push(['AUDIO', audioStream ? 'MIC ON' : 'MIC OFF', audioStream ? '#dbe7ff' : '#ffb347']);
 
     if (showTelemetry) {
@@ -555,6 +566,11 @@
         ? 'Main download started. Green-screen copy skipped and the completed backend cache was cleared.'
         : 'Main download started locally. Green-screen copy skipped; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
     }
+  }
+
+  function syncedRemainingMs(data) {
+    const exact = Number(data.remainingMs ?? data.leftMs);
+    return Number.isFinite(exact) ? exact : NaN;
   }
 
   function makeRecordingId() {
