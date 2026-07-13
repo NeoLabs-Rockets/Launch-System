@@ -35,10 +35,13 @@ let sync = null;
 let launchCodeMemory = '';
 let launchCountdownTimer = null;
 let launchHeartbeatTimer = null;
+let launchHeartbeatGeneration = 0;
 let launchCountdownEndsAt = 0;
 let launchCountdownActive = false;
+let launchCountdownStartedAt = 0;
 let launchLastSpokenSecond = null;
 let launchAudioCtx = null;
+let launchUtterance = null;
 let launchSpeechReady = false;
 let lastLaunchEvent = null;
 const seenSharedLaunchEvents = new Set();
@@ -439,15 +442,24 @@ async function runLaunchCountdownTick() {
 function startLaunchHeartbeat() {
   stopLaunchHeartbeat();
   bleLink.setPingSuspended(true);
-  launchHeartbeatTimer = setInterval(() => {
-    if (!bleLink.connected) return;
+  const generation = launchHeartbeatGeneration;
+  const pulse = async () => {
+    if (!launchCountdownActive || !bleLink.connected) return;
     const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
-    sendBle({ cmd: 'heartbeat', left }).catch(() => {});
-  }, 700);
+    try { await sendBle({ cmd: 'heartbeat', left }); } catch (_) {}
+    // Schedule only after the previous GATT write settled. Slow Chrome/macOS
+    // writes can otherwise build an ever-growing queue and starve the ESP32's
+    // three-second heartbeat watchdog.
+    if (generation === launchHeartbeatGeneration && launchCountdownActive && bleLink.connected) {
+      launchHeartbeatTimer = setTimeout(pulse, 650);
+    }
+  };
+  pulse();
 }
 
 function stopLaunchHeartbeat() {
-  clearInterval(launchHeartbeatTimer);
+  launchHeartbeatGeneration++;
+  clearTimeout(launchHeartbeatTimer);
   launchHeartbeatTimer = null;
   bleLink.setPingSuspended(false);
 }
@@ -479,6 +491,7 @@ async function startCountdownWithCode(seconds, code) {
   await sendBle({ cmd: 'countdown_start', seconds });
   launchCountdownEndsAt = Date.now() + seconds * 1000;
   launchCountdownActive = true;
+  launchCountdownStartedAt = Date.now();
   launchLastSpokenSecond = null;
   persistActiveLaunch();
   broadcastLaunch({ type: 'countdown_start', seconds, endsAt: launchCountdownEndsAt, mode: 'ble' });
@@ -510,9 +523,11 @@ async function abortController() {
 }
 
 function stopLaunchCountdownUi(reason) {
+  stopLaunchHeartbeat();
   clearInterval(launchCountdownTimer);
   launchCountdownTimer = null;
   launchCountdownActive = false;
+  launchCountdownStartedAt = 0;
   launchLastSpokenSecond = null;
   setText('ble-countdown', 'Idle');
   setText('ble-countdown-sub', reason || 'No active sequence');
@@ -540,7 +555,11 @@ function applyBleStatus(s) {
     authStatusWaiter(bleStatusData.error === 'auth_ok');
   }
   if (!bleStatusData.armed) launchCodeMemory = launchCountdownActive ? launchCodeMemory : '';
-  if (!bleStatusData.countdown && launchCountdownActive) {
+  // Chrome/macOS may deliver the last pre-command notification after the GATT
+  // write promise resolves. Ignore that stale `countdown:false` briefly; the
+  // controller's next one-second status notification confirms the real state.
+  const countdownStartSettling = launchCountdownActive && Date.now() - launchCountdownStartedAt < 1500;
+  if (!bleStatusData.countdown && launchCountdownActive && !countdownStartSettling) {
     stopLaunchCountdownUi('Device stopped countdown');
     broadcastLaunch({ type: 'abort', reason: 'Device stopped countdown', mode: 'ble' });
     clearPersistedLaunch();
@@ -808,8 +827,6 @@ function restoreActiveLaunch() {
 function resumeRestoredCountdown() {
   if (!launchCountdownActive || !launchCountdownEndsAt) return;
   startLaunchHeartbeat();
-  const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
-  sendBle({ cmd: 'heartbeat', left }).catch(() => {});
   clearInterval(launchCountdownTimer);
   launchCountdownTimer = setInterval(runLaunchCountdownTick, 150);
   runLaunchCountdownTick();
@@ -826,6 +843,10 @@ function primeLaunchSpeech() {
     speechSynthesis.cancel();
     speechSynthesis.getVoices();
     launchSpeechReady = true;
+    try {
+      launchAudioCtx = launchAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (launchAudioCtx.state === 'suspended') launchAudioCtx.resume();
+    } catch (_) {}
     return true;
   } catch (_) {
     return false;
@@ -840,7 +861,7 @@ function speakLaunchSecond(second) {
   if (!launchCountdownActive || second === launchLastSpokenSecond) return;
   launchLastSpokenSecond = second;
   const text = second <= 0 ? 'Ignition' : String(second);
-  if (primeLaunchSpeech() || launchSpeechReady) {
+  if (launchSpeechReady) {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
       const voices = speechSynthesis.getVoices();
@@ -851,7 +872,14 @@ function speakLaunchSecond(second) {
       utterance.pitch = second <= 3 ? 1.18 : 1;
       utterance.volume = 1;
       speechSynthesis.cancel();
+      // Keep a reference until the browser reports completion. Chrome on macOS
+      // can otherwise garbage-collect short utterances before they are spoken.
+      launchUtterance = utterance;
+      utterance.onend = utterance.onerror = () => {
+        if (launchUtterance === utterance) launchUtterance = null;
+      };
       speechSynthesis.speak(utterance);
+      beepLaunch(second <= 0 ? 440 : 880, second <= 0 ? 0.28 : 0.055);
       return;
     } catch (_) {}
   }
@@ -877,6 +905,7 @@ function beepLaunch(freq, duration) {
 function cancelLaunchSpeech() {
   try {
     if ('speechSynthesis' in window) speechSynthesis.cancel();
+    launchUtterance = null;
   } catch (_) {}
 }
 
