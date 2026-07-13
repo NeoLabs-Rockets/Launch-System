@@ -2,7 +2,7 @@
   NeoLabs Mission Dashboard — Launch Camera.
   Wrapped in an IIFE for the single-page app. Renders a cinematic broadcast HUD
   over the camera feed, follows the shared device countdown, and overlays live
-  flight/weather telemetry pulled from the dashboard (same document now).
+  controller/flight/weather telemetry pulled from the dashboard (same document now).
 */
 (function () {
   'use strict';
@@ -31,6 +31,7 @@
   let cameraBleConnected = false;
   let cameraBleShared = false;
   let cameraBleDeviceName = '';
+  let cameraControllerStatus = null;
   let countdownAudioCtx = null;
   let countdownAudioDest = null;
   let lastCountdownSpoken = null;
@@ -162,6 +163,7 @@
     cameraBleConnected = !!data.connected;
     cameraBleShared = cameraBleConnected && !!data.shared;
     cameraBleDeviceName = data.deviceName || '';
+    cameraControllerStatus = data.status && typeof data.status === 'object' ? data.status : null;
     setText('cam-ble-state', cameraBleConnected
       ? `${cameraBleShared ? 'Shared BLE' : 'Direct BLE'}${cameraBleDeviceName ? ` · ${cameraBleDeviceName}` : ''}`
       : 'Offline');
@@ -197,7 +199,7 @@
     stopStreams();
     const q = quality();
     const facingMode = document.getElementById('cam-facing').value;
-    const lens = Number(document.getElementById('cam-lens')?.value || 1);
+    const lens = Number(document.getElementById('cam-lens')?.value || 0.7);
     const wantsAudio = document.getElementById('cam-audio').value === 'on';
     setStatus('Opening camera', 'Requesting device permissions.', 'warn');
     try {
@@ -430,7 +432,7 @@
 
   function drawTelemetry(ctx, w, h, pad, u, ctx2) {
     const tiles = [];
-    tiles.push(['LINK', cameraBleConnected ? (cameraBleShared ? 'SHARED BLE' : 'DIRECT BLE') : 'OFFLINE', cameraBleConnected ? '#dbe7ff' : '#ffb347']);
+    tiles.push(launchStateTile(ctx2.countdownMs));
     tiles.push(['AUDIO', audioStream ? 'MIC ON' : 'MIC OFF', audioStream ? '#dbe7ff' : '#ffb347']);
 
     if (showTelemetry) {
@@ -460,6 +462,18 @@
     });
     // (Branding lives in the top-left block; no bottom wordmark so the telemetry
     // tiles always have the full strip width and never get overlapped.)
+  }
+
+  function launchStateTile(countdownMs) {
+    if (ignitionAt > 0) return ['LAUNCH STATE', 'LIFTOFF', '#36f0a0'];
+    if (countdownMs != null && countdownMs <= 0) return ['LAUNCH STATE', 'IGNITION', '#36f0a0'];
+    if (countdownMs != null) return ['LAUNCH STATE', 'COUNTDOWN', '#ffb347'];
+    if (cameraControllerStatus?.trigger) return ['LAUNCH STATE', 'IGNITION', '#36f0a0'];
+    if (cameraControllerStatus?.locked) return ['LAUNCH STATE', 'LOCKED', '#ff4a3d'];
+    if (cameraControllerStatus?.countdown) return ['LAUNCH STATE', 'COUNTDOWN', '#ffb347'];
+    if (cameraControllerStatus?.armed) return ['LAUNCH STATE', 'ARMED', '#ffb347'];
+    if (cameraBleConnected && cameraControllerStatus) return ['LAUNCH STATE', 'SAFE', '#36f0a0'];
+    return ['LAUNCH STATE', cameraBleConnected ? 'STATUS PENDING' : 'NO DATA', '#ffb347'];
   }
 
   function degToCompass(d) {
