@@ -19,6 +19,7 @@
   let greenRecordingFinished = false;
   let recordingCacheId = '';
   let cacheUploadTasks = [];
+  let pendingGreenDownload = null;
   let drawFrameId = null;
   let recordStartedAt = 0;
   let durationTimer = null;
@@ -68,6 +69,7 @@
   function bindControls() {
     document.getElementById('cam-record').addEventListener('click', startRecording);
     document.getElementById('cam-stop').addEventListener('click', stopRecording);
+    document.getElementById('cam-download-green').addEventListener('click', downloadPendingGreenRecording);
     // Retry path with no extra button: tap the stage to re-request the camera.
     const stage = document.querySelector('#view-camera .camera-stage');
     if (stage) stage.addEventListener('click', () => { if (!sourceStream) openCamera(); });
@@ -508,6 +510,7 @@
 
     chunks = [];
     greenChunks = [];
+    clearPendingGreenDownload();
     mainRecordingFinished = false;
     greenRecordingFinished = false;
     recordingCacheId = makeRecordingId();
@@ -572,27 +575,47 @@
 
     const cached = await finalizeBackendRecording();
     const mainDownload = cached ? await fetchCachedRecording('main') : null;
+    const greenDownload = cached ? await fetchCachedRecording('green') : null;
     downloadBlob(mainDownload || blob, `neolabs-launch-${stamp}.webm`);
     if (mainDownload) await acknowledgeCachedRecording('main');
+    pendingGreenDownload = {
+      blob: greenDownload || greenBlob,
+      filename: `neolabs-launch-green-screen-${stamp}.webm`,
+      acknowledgeCache: cached,
+      cacheId: recordingCacheId
+    };
+    const greenButton = document.getElementById('cam-download-green');
+    greenButton.hidden = false;
+    greenButton.disabled = false;
     setText('cam-download', `${Math.round(blob.size / 1024 / 1024 * 10) / 10} MB`);
     setStatus('Recording saved', cached
-      ? 'Main download started from the completed backend cache. A green-screen copy is ready.'
-      : 'Main download started locally. The incomplete backend cache was retained for recovery.', cached ? 'ok' : 'warn');
+      ? 'Main download started. Use the Green-Screen button for the overlay copy.'
+      : 'Main download started locally. Use the Green-Screen button for the overlay copy.', cached ? 'ok' : 'warn');
+  }
 
-    // Ask after the normal recording starts downloading, as this second file is
-    // optional and can be large at 1080p/60 fps.
-    if (window.confirm('Also download this recording with the same overlay over a green background?')) {
-      const greenDownload = cached ? await fetchCachedRecording('green') : null;
-      downloadBlob(greenDownload || greenBlob, `neolabs-launch-green-screen-${stamp}.webm`);
-      if (greenDownload) await acknowledgeCachedRecording('green');
-      setStatus('Recordings saved', cached
-        ? 'Both completed downloads started and the temporary backend cache was cleared.'
-        : 'Both local downloads started; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
-    } else {
-      if (cached) await acknowledgeCachedRecording('green');
-      setStatus('Recording saved', cached
-        ? 'Main download started. Green-screen copy skipped and the completed backend cache was cleared.'
-        : 'Main download started locally. Green-screen copy skipped; incomplete backend data remains cached.', cached ? 'ok' : 'warn');
+  async function downloadPendingGreenRecording() {
+    if (!pendingGreenDownload?.blob) return;
+    const pending = pendingGreenDownload;
+    const button = document.getElementById('cam-download-green');
+    button.disabled = true;
+    // This click is a dedicated user gesture, so Chrome does not classify the
+    // overlay as a blocked second automatic download.
+    downloadBlob(pending.blob, pending.filename);
+    if (pending.acknowledgeCache) await acknowledgeCachedRecording('green', pending.cacheId);
+    pendingGreenDownload = null;
+    button.hidden = true;
+    button.disabled = false;
+    setStatus('Recordings saved', 'Main recording and green-screen overlay downloaded.', 'ok');
+  }
+
+  function clearPendingGreenDownload() {
+    const stale = pendingGreenDownload;
+    pendingGreenDownload = null;
+    if (stale?.acknowledgeCache) acknowledgeCachedRecording('green', stale.cacheId);
+    const button = document.getElementById('cam-download-green');
+    if (button) {
+      button.hidden = true;
+      button.disabled = false;
     }
   }
 
@@ -705,9 +728,9 @@
     }
   }
 
-  async function acknowledgeCachedRecording(variant) {
+  async function acknowledgeCachedRecording(variant, id = recordingCacheId) {
     try {
-      await fetch(`/api/recordings/${encodeURIComponent(recordingCacheId)}/${variant}`, { method: 'DELETE' });
+      await fetch(`/api/recordings/${encodeURIComponent(id)}/${variant}`, { method: 'DELETE' });
     } catch (_) {}
   }
 

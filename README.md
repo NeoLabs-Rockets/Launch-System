@@ -31,13 +31,8 @@ A single-page web app that runs on a laptop at the launch site and connects to t
 | **Camera overlay** | Cinematic broadcast HUD with live T−countdown ring (bottom-right), T+ elapsed after ignition, BLE and weather telemetry. |
 | **Cross-device camera** | Phone subscribes to the laptop's SSE stream and receives the countdown + BLE state in real time — no BLE on the phone needed. |
 
-### Auth (for public/cloud deployment)
+<img width="1889" height="1062" alt="image" src="https://github.com/user-attachments/assets/b27e0e8c-c9e6-4ff2-8b42-a8989720d940" />
 
-```bash
-cp MissionDashboard/.env.example MissionDashboard/.env
-# edit .env and set:
-DASHBOARD_PASSWORD=your-strong-password
-```
 
 ---
 
@@ -46,6 +41,8 @@ DASHBOARD_PASSWORD=your-strong-password
 ESP32 WiFi + BLE launch controller — see [`/LaunchSystem`](LaunchSystem/).
 
 The ESP32 runs as its own WiFi Access Point and serves a branded web UI with an **arm → launch** workflow, a voice countdown, and a REST API. It also exposes a BLE GATT service used by the Mission Dashboard for a more reliable, guided launch sequence.
+
+<img width="606" height="453" alt="image" src="https://github.com/user-attachments/assets/0b5191ed-5da1-4f4f-921d-e79cdb443e06" />
 
 See the [LaunchSystem README](LaunchSystem/ReadMe.md) for wiring, pin assignments, parts list, and REST API.
 
