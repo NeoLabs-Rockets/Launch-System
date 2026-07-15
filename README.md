@@ -18,7 +18,7 @@
 
 ## Mission Dashboard
 
-A single-page web app that runs on a laptop at the launch site and connects to the ESP32 controller over Bluetooth (BLE).
+A single-page web app that runs on a laptop at the launch site and connects to a custom PCB over Bluetooth (BLE).
 
 ### Features
 
@@ -38,9 +38,7 @@ A single-page web app that runs on a laptop at the launch site and connects to t
 
 ## Launch System
 
-ESP32 WiFi + BLE launch controller — see [`/LaunchSystem`](LaunchSystem/).
-
-The ESP32 runs as its own WiFi Access Point and serves a branded web UI with an **arm → launch** workflow, a voice countdown, and a REST API. It also exposes a BLE GATT service used by the Mission Dashboard for a more reliable, guided launch sequence.
+BLE launch controller — see [`/LaunchSystem`](LaunchSystem/).
 
 <img width="606" height="453" alt="image" src="https://github.com/user-attachments/assets/0b5191ed-5da1-4f4f-921d-e79cdb443e06" />
 
