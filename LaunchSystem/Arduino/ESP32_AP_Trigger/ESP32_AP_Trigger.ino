@@ -24,11 +24,11 @@ static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
-static const char FIRMWARE_VERSION[] = "2.3.0";
+static const char FIRMWARE_VERSION[] = "2.4.0";
 
 NimBLECharacteristic* statusChar = nullptr;
 bool armed = false, firing = false, countdown = false, locked = false;
-bool continuity = false, continuityRaw = false;
+bool continuity = false, continuityRaw = false, continuityOverride = false;
 unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0, continuityChangedAt = 0;
 int attempts = 0, connectedCount = 0;
 String ownerSid, lastError;
@@ -67,6 +67,7 @@ void safeStop(const char* reason) {
   armed = false;
   countdown = false;
   firing = false;
+  continuityOverride = false;
   ownerSid = "";
   lastError = reason;
   digitalWrite(RELAY_PIN, LOW);
@@ -76,8 +77,8 @@ void publishStatus() {
   if (!statusChar) return;
   char data[190];
   snprintf(data, sizeof(data),
-    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
-    armed, firing, countdown, locked, continuity, locked ? 0 : MAX_ATTEMPTS - attempts,
+    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"b\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
+    armed, firing, countdown, locked, continuity, continuityOverride, locked ? 0 : MAX_ATTEMPTS - attempts,
     connectedCount, millis(), lastError.c_str(), FIRMWARE_VERSION);
   statusChar->setValue((uint8_t*)data, strlen(data));
   statusChar->notify();
@@ -91,7 +92,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     if (connectedCount > 0) connectedCount--;
-    if (armed || countdown) safeStop("owner_lost");
+    if (armed || countdown || continuityOverride) safeStop("owner_lost");
+    else ownerSid = "";
     NimBLEDevice::getAdvertising()->start();
     publishStatus();
   }
@@ -115,9 +117,26 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
     }
     if (locked) { lastError = "locked"; publishStatus(); return; }
 
+    if (cmd == "continuity_override") {
+      if (firing || countdown) { lastError = "trigger_active"; publishStatus(); return; }
+      if (ownerSid.length() && ownerSid != sid) { lastError = "not_owner"; publishStatus(); return; }
+      const bool enabled = jsonInt(body, "enabled", 0) == 1;
+      if (enabled) {
+        continuityOverride = true;
+        ownerSid = sid;
+      } else if (armed && !continuity) {
+        safeStop("continuity_lost");
+      } else {
+        continuityOverride = false;
+        if (!armed) ownerSid = "";
+      }
+      publishStatus();
+      return;
+    }
+
     if (cmd == "arm") {
       if (ownerSid.length() && ownerSid != sid) { lastError = "not_owner"; publishStatus(); return; }
-      if (!continuity) { lastError = "no_continuity"; publishStatus(); return; }
+      if (!continuity && !continuityOverride) { lastError = "no_continuity"; publishStatus(); return; }
       attempts = 0;
       ownerSid = sid;
       armed = true;
@@ -129,14 +148,14 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
 
     if (!ownerSid.length() || sid != ownerSid) { lastError = "not_owner"; publishStatus(); return; }
     if (cmd == "countdown_start") {
-      if (!continuity) safeStop("continuity_lost");
+      if (!continuity && !continuityOverride) safeStop("continuity_lost");
       else if (!armed || firing) lastError = armed ? "trigger_active" : "not_armed";
       else { countdown = true; lastHeartbeat = millis(); }
     } else if (cmd == "heartbeat") {
       if (countdown) lastHeartbeat = millis();
     } else if (cmd == "trigger") {
       if (!armed) lastError = "not_armed";
-      else if (!continuity) safeStop("continuity_lost");
+      else if (!continuity && !continuityOverride) safeStop("continuity_lost");
       else if (!countdown || millis() - lastHeartbeat > COUNTDOWN_TIMEOUT_MS) safeStop("heartbeat_lost");
       else {
         digitalWrite(RELAY_PIN, HIGH);
@@ -144,6 +163,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
         triggerStarted = millis();
         armed = false;
         countdown = false;
+        continuityOverride = false;
         ownerSid = "";
         motorPulse(120);
       }
@@ -195,7 +215,8 @@ void loop() {
     continuityChangedAt = now;
   } else if (continuity != continuityRaw && now - continuityChangedAt >= CONTINUITY_DEBOUNCE_MS) {
     continuity = continuityRaw;
-    if (!continuity && (armed || countdown)) safeStop("continuity_lost");
+    if (continuity) continuityOverride = false;
+    if (!continuity && !continuityOverride && (armed || countdown)) safeStop("continuity_lost");
     else if (continuity && (lastError == "no_continuity" || lastError == "continuity_lost")) lastError = "";
     publishStatus();
   }

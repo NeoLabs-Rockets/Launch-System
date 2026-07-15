@@ -111,6 +111,8 @@ function bindBleUi() {
   on('ble-disarm', 'click', disarmLaunch);
   on('ble-launch', 'click', startLaunchCountdown);
   on('ble-abort', 'click', abortLaunchCountdown);
+  on('ble-continuity-override', 'click', toggleContinuityOverride);
+  on('ds-continuity-override', 'click', toggleContinuityOverride);
   document.querySelectorAll('.ble-check,#ble-code,#ble-count-seconds').forEach(el => {
     el.addEventListener('input', () => { renderLaunch(); });
     el.addEventListener('change', () => { renderLaunch(); });
@@ -393,6 +395,20 @@ async function disarmLaunch() {
   renderLaunch();
 }
 
+async function toggleContinuityOverride() {
+  const status = currentStatus();
+  const enabled = !status.continuityOverride;
+  if (enabled && !window.confirm('Ignore the motor/igniter continuity interlock for this launch session?\n\nDisarm, abort, launch, or BLE loss will restore the interlock automatically.')) return;
+  try {
+    if (!bleLink.connected) await sendRemoteCommand('continuity_override', { enabled });
+    else await sendBle({ cmd: 'continuity_override', enabled: enabled ? 1 : 0 });
+    setLaunchState(enabled ? 'Continuity interlock temporarily bypassed' : 'Continuity interlock restored', enabled ? 'warn' : 'ok');
+  } catch (err) {
+    setLaunchState(`Continuity override failed: ${err.message || err}`, 'bad');
+  }
+  renderLaunch();
+}
+
 async function startLaunchCountdown() {
   const seconds = clamp(Number(el('ble-count-seconds')?.value), 5, 60);
   wakeLockPreflight = true;
@@ -551,6 +567,7 @@ function applyBleStatus(s) {
     countdown: !!s.c,
     locked: !!s.l,
     continuity: s.q === 1 || s.q === true,
+    continuityOverride: s.b === 1 || s.b === true,
     attemptsLeft: s.left,
     clients: s.n || 0,
     uptime: s.u || 0,
@@ -643,6 +660,8 @@ function renderLaunch() {
   const locked = !!status.locked;
   const countdownLive = launchCountdownActive || sharedCountdownActive || !!status.countdown;
   const checklistReady = allLaunchChecks();
+  const physicalContinuity = status.continuity === true;
+  const continuityBypassed = !physicalContinuity && status.continuityOverride === true;
   const hasContinuity = continuityReady(status);
   const bluetoothSupported = NeoBleLink.supported();
 
@@ -675,7 +694,7 @@ function renderLaunch() {
   setText('ble-armed', armed ? 'Yes' : 'No');
   setText('ble-clients', status.clients ?? 0);
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
-  setText('ble-continuity', !linked ? 'Unknown' : hasContinuity ? 'Connected' : 'Open circuit');
+  setText('ble-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Bypassed' : physicalContinuity ? 'Connected' : 'Open circuit');
   const linkedName = bleLink.connected || reconnecting
     ? (bleLink.deviceName || 'Linked')
     : (sharedState.ownerName || 'Shared BLE link');
@@ -684,35 +703,45 @@ function renderLaunch() {
   // Modal status badge
   const badge = el('ble-go-badge');
   const label = el('ble-go-label');
-  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : 'go'}`;
-  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : !hasContinuity ? 'OPEN' : armed ? 'ARMED' : 'SAFE';
+  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
 
   // Dashboard summary card
   setText('ds-link', el('ble-state')?.textContent || (linked ? 'Linked' : 'Not connected'));
   setText('ds-link-state', linked ? linkedName : 'Offline');
   setText('ds-armed', locked ? 'Locked' : armed ? 'Yes' : 'No');
-  setText('ds-continuity', !linked ? 'Unknown' : hasContinuity ? 'Ready' : 'Open');
+  setText('ds-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Ignored' : physicalContinuity ? 'Ready' : 'Open');
   setText('ds-countdown', countdownLive ? 'Active' : 'Idle');
   setText('ds-countdown-sub', launchCountdownActive ? 'BLE heartbeat live' : sharedCountdownActive ? 'Synchronized from BLE owner' : 'No active sequence');
   setText('ds-clients', serverClientCount);
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : 'go'}`;
-  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : !hasContinuity ? 'OPEN' : armed ? 'ARMED' : 'SAFE';
+  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
 
   const continuityCards = [el('ds-continuity-item'), el('lc-continuity-check')];
   continuityCards.forEach(card => {
     if (!card) return;
-    card.classList.toggle('continuity-ok', linked && hasContinuity);
-    card.classList.toggle('continuity-bad', linked && !hasContinuity);
+    card.classList.toggle('continuity-ok', linked && physicalContinuity);
+    card.classList.toggle('continuity-bypassed', linked && continuityBypassed);
+    card.classList.toggle('continuity-bad', linked && !hasContinuity && !continuityBypassed);
     card.classList.toggle('continuity-unknown', !linked);
   });
-  setText('lc-continuity-title', !linked ? 'Waiting for controller' : hasContinuity ? 'Motor circuit connected' : 'Motor circuit open');
+  setText('lc-continuity-title', !linked ? 'Waiting for controller' : continuityBypassed ? 'Continuity check ignored' : physicalContinuity ? 'Motor circuit connected' : 'Motor circuit open');
   setText('lc-continuity-detail', !linked
     ? 'Continuity is verified by GPIO39 after BLE connects.'
-    : hasContinuity
+    : continuityBypassed
+    ? 'Temporary override is active for this launch session.'
+    : physicalContinuity
     ? 'GPIO39 reports a closed ignition circuit. This required check is automatic.'
     : 'Connect the igniter/motor circuit. Arming remains locked until GPIO39 reports continuity.');
+  [el('ble-continuity-override'), el('ds-continuity-override')].forEach(overrideButton => {
+    if (!overrideButton) return;
+    overrideButton.hidden = !linked || physicalContinuity;
+    overrideButton.disabled = reconnecting || selfOwnerDown || !!status.trigger || countdownLive;
+    overrideButton.textContent = continuityBypassed ? 'Restore continuity check' : 'Ignore continuity';
+    overrideButton.classList.toggle('active', continuityBypassed);
+  });
 
   // camera.js owns its label so direct/shared state cannot be overwritten by a
   // generic launch-console render. Keep a fallback for pages without that hook.
@@ -811,7 +840,7 @@ function allLaunchChecks() {
 }
 
 function continuityReady(status = currentStatus()) {
-  return status.continuity === true;
+  return status.continuity === true || status.continuityOverride === true;
 }
 
 function clearVisibleCode() {
@@ -1348,6 +1377,7 @@ async function executeRemoteCommand(message) {
     else if (command === 'disarm') await disarmController();
     else if (command === 'countdown_start') await startCountdownWithCode(clamp(Number(args.seconds), 5, 60), '');
     else if (command === 'abort') await abortController();
+    else if (command === 'continuity_override') await sendBle({ cmd: 'continuity_override', enabled: args.enabled ? 1 : 0 });
     await requestFreshBleStatus();
     sync.relay({ type: 'command_result', commandId: message.commandId, ok: true, status: bleStatusData });
   } catch (err) {

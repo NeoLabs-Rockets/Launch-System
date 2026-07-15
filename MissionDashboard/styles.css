@@ -481,9 +481,16 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 .continuity-icon span{width:12px;height:12px;border-radius:50%;background:currentColor;box-shadow:0 0 14px currentColor}
 .continuity-check strong{display:block;color:#fff;font-size:.9em;margin-bottom:3px}
 .continuity-check small{display:block;color:var(--muted);font-size:.7em;line-height:1.4}
+.continuity-override{display:block;margin-top:5px;padding:0;border:0;background:none;color:rgba(190,205,225,.42);
+  font:inherit;font-size:.58em;letter-spacing:.05em;text-decoration:underline;text-decoration-style:dotted;
+  text-underline-offset:3px;cursor:pointer;transition:color .2s}
+.continuity-override:hover,.continuity-override:focus-visible{color:var(--amber)}
+.continuity-override.active{color:var(--amber);font-weight:700}
+.continuity-override:disabled{opacity:.35;cursor:not-allowed}
 .continuity-required{font-size:.58em;font-weight:800;letter-spacing:.13em;text-transform:uppercase;padding:5px 8px;border:1px solid currentColor;border-radius:999px}
 .continuity-ok{color:var(--green);border-color:rgba(54,240,160,.38)!important;background:rgba(54,240,160,.075)!important;box-shadow:inset 0 0 24px rgba(54,240,160,.04)}
 .continuity-bad{color:var(--red);border-color:rgba(255,74,61,.42)!important;background:rgba(255,74,61,.08)!important}
+.continuity-bypassed{color:var(--amber);border-color:rgba(255,179,71,.4)!important;background:rgba(255,179,71,.075)!important}
 .continuity-unknown{color:var(--amber)}
 #ds-continuity-item.continuity-ok .v{color:var(--green)}
 #ds-continuity-item.continuity-bad .v{color:var(--red)}

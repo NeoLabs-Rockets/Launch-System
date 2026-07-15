@@ -1,3 +1,4 @@
 /MissionDashboard/node_modules
 /MissionDashboard/.env
 .DS_Store
+/.pio
