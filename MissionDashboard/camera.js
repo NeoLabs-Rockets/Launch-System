@@ -36,6 +36,7 @@
   let countdownAudioCtx = null;
   let countdownAudioDest = null;
   let lastCountdownSpoken = null;
+  let countdownUtterance = null;
   let speechPrimed = false;
   let showTelemetry = true;
   const seenLaunchEventIds = new Set();
@@ -121,7 +122,9 @@
       if (seenLaunchEventIds.size > 100) seenLaunchEventIds.delete(seenLaunchEventIds.values().next().value);
     }
     if (data.type === 'countdown_start') {
+      cancelCountdownSpeech();
       lastCountdownSpoken = null;
+      ignitionAt = 0;
       const remainingMs = syncedRemainingMs(data);
       externalCountdownTotalMs = Math.max(1000, (data.seconds || 0) * 1000 || remainingMs || 1000);
       externalCountdownBaseEndsAt = Number.isFinite(remainingMs)
@@ -145,12 +148,14 @@
       externalCountdownActive = true; // keep drawing T+ until recording stops
       setText('cam-count-state', 'T+0:00 — Liftoff');
     } else if (data.type === 'abort') {
+      cancelCountdownSpeech();
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
       lastCountdownSpoken = null;
       setText('cam-count-state', 'Aborted');
     } else if (data.type === 'sync_lost') {
+      cancelCountdownSpeech();
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
@@ -779,6 +784,12 @@
     const second = leftMs <= 0 ? 0 : Math.ceil(leftMs / 1000);
     if (second > 10 || second === lastCountdownSpoken) return;
     lastCountdownSpoken = second;
+    // bluetooth.js is the sole speech owner on the machine holding the direct
+    // BLE link. The camera speaks only on synchronized viewer devices. Having
+    // both pipelines use the same global speechSynthesis instance caused each
+    // number to be announced twice, mutual cancellation around T-8, and a
+    // wedged engine on the following launch.
+    if (window.NeoLaunch?.localBleOwner?.()) return;
     playRecordedCountdownCue(second);
     speakOverSpeaker(second);
   }
@@ -814,9 +825,20 @@
       utterance.rate = 1.32;
       utterance.pitch = second <= 3 ? 1.15 : 1;
       utterance.volume = 1;
-      speechSynthesis.cancel();
+      if (countdownUtterance) speechSynthesis.cancel();
+      countdownUtterance = utterance;
+      utterance.onend = utterance.onerror = () => {
+        if (countdownUtterance === utterance) countdownUtterance = null;
+      };
       speechSynthesis.speak(utterance);
     } catch (_) {}
+  }
+
+  function cancelCountdownSpeech() {
+    try {
+      if (countdownUtterance && 'speechSynthesis' in window) speechSynthesis.cancel();
+    } catch (_) {}
+    countdownUtterance = null;
   }
 
   function setStatus(title, detail, state) {

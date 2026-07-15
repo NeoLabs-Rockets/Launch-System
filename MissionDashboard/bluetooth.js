@@ -139,6 +139,9 @@ function publishPublicApi() {
     close: closeLaunchConsole,
     connected: () => bleLink.connected || sharedState.ownerActive,
     countdownActive: () => launchCountdownActive || sharedCountdownActive,
+    // The BLE-owning page announces its own countdown. Other devices leave
+    // speech to camera.js, which follows the server-relayed countdown.
+    localBleOwner: () => bleLink.connected,
     status: () => bleStatusData || {}
   };
 }
@@ -929,7 +932,10 @@ function speakLaunchSecond(second) {
       utterance.rate = 1.28;
       utterance.pitch = second <= 3 ? 1.18 : 1;
       utterance.volume = 1;
-      speechSynthesis.cancel();
+      // Cancelling an already-idle speech engine for every number can wedge
+      // Chrome/macOS speech synthesis. Only interrupt an utterance that is
+      // genuinely still running late.
+      if (launchUtterance) speechSynthesis.cancel();
       // Keep a reference until the browser reports completion. Chrome on macOS
       // can otherwise garbage-collect short utterances before they are spoken.
       launchUtterance = utterance;
@@ -992,7 +998,11 @@ function broadcastLaunch(payload) {
   const durable = ['countdown_start', 'abort', 'ignition'].includes(payload.type);
   const message = {
     ...payload,
-    ...(durable ? { eventId: payload.eventId || makeSessionId() } : {}),
+    // Every event needs an identity, including the high-frequency ticks. This
+    // page sends events both directly to camera.js and over BroadcastChannel;
+    // without an id, a delayed channel copy can replay an older second after a
+    // newer direct tick has already been announced.
+    eventId: payload.eventId || makeSessionId(),
     source: 'launch-dashboard',
     at: Date.now()
   };
