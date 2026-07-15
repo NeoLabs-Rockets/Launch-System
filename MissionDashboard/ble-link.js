@@ -13,7 +13,8 @@
 
   Events:
     'state'  { state, reason?, attempt?, nextRetryMs?, error? }
-    'status' parsed controller status JSON (raw {a,f,c,l,left,n,u,e,v} payload)
+    'status' parsed controller status JSON (raw {a,f,c,l,q,left,n,u,e,v} payload;
+                                             q = ignition continuity)
     'health' { staleMs } while connected (controller notifies every ~1 s)
 */
 (function () {

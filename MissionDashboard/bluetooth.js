@@ -342,6 +342,11 @@ async function disconnectBle() {
 
 /* ─────────────────────────── Commands ─────────────────────────── */
 async function armLaunch() {
+  if (!continuityReady()) {
+    setLaunchState('Arming blocked — connect the launch system to the motor and verify continuity', 'bad');
+    renderLaunch();
+    return;
+  }
   if (!allLaunchChecks()) {
     setLaunchState('Complete the safety checklist before arming', 'warn');
     return;
@@ -545,6 +550,7 @@ function applyBleStatus(s) {
     trigger: !!s.f,
     countdown: !!s.c,
     locked: !!s.l,
+    continuity: s.q === 1 || s.q === true,
     attemptsLeft: s.left,
     clients: s.n || 0,
     uptime: s.u || 0,
@@ -637,6 +643,7 @@ function renderLaunch() {
   const locked = !!status.locked;
   const countdownLive = launchCountdownActive || sharedCountdownActive || !!status.countdown;
   const checklistReady = allLaunchChecks();
+  const hasContinuity = continuityReady(status);
   const bluetoothSupported = NeoBleLink.supported();
 
   // Buttons
@@ -668,6 +675,7 @@ function renderLaunch() {
   setText('ble-armed', armed ? 'Yes' : 'No');
   setText('ble-clients', status.clients ?? 0);
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
+  setText('ble-continuity', !linked ? 'Unknown' : hasContinuity ? 'Connected' : 'Open circuit');
   const linkedName = bleLink.connected || reconnecting
     ? (bleLink.deviceName || 'Linked')
     : (sharedState.ownerName || 'Shared BLE link');
@@ -676,20 +684,35 @@ function renderLaunch() {
   // Modal status badge
   const badge = el('ble-go-badge');
   const label = el('ble-go-label');
-  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked ? 'nogo' : armed ? 'nogo' : 'go'}`;
-  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
+  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : 'go'}`;
+  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : !hasContinuity ? 'OPEN' : armed ? 'ARMED' : 'SAFE';
 
   // Dashboard summary card
   setText('ds-link', el('ble-state')?.textContent || (linked ? 'Linked' : 'Not connected'));
   setText('ds-link-state', linked ? linkedName : 'Offline');
   setText('ds-armed', locked ? 'Locked' : armed ? 'Yes' : 'No');
+  setText('ds-continuity', !linked ? 'Unknown' : hasContinuity ? 'Ready' : 'Open');
   setText('ds-countdown', countdownLive ? 'Active' : 'Idle');
   setText('ds-countdown-sub', launchCountdownActive ? 'BLE heartbeat live' : sharedCountdownActive ? 'Synchronized from BLE owner' : 'No active sequence');
   setText('ds-clients', serverClientCount);
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : armed ? 'nogo' : 'go'}`;
-  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : 'SAFE';
+  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : 'go'}`;
+  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : !hasContinuity ? 'OPEN' : armed ? 'ARMED' : 'SAFE';
+
+  const continuityCards = [el('ds-continuity-item'), el('lc-continuity-check')];
+  continuityCards.forEach(card => {
+    if (!card) return;
+    card.classList.toggle('continuity-ok', linked && hasContinuity);
+    card.classList.toggle('continuity-bad', linked && !hasContinuity);
+    card.classList.toggle('continuity-unknown', !linked);
+  });
+  setText('lc-continuity-title', !linked ? 'Waiting for controller' : hasContinuity ? 'Motor circuit connected' : 'Motor circuit open');
+  setText('lc-continuity-detail', !linked
+    ? 'Continuity is verified by GPIO39 after BLE connects.'
+    : hasContinuity
+    ? 'GPIO39 reports a closed ignition circuit. This required check is automatic.'
+    : 'Connect the igniter/motor circuit. Arming remains locked until GPIO39 reports continuity.');
 
   // camera.js owns its label so direct/shared state cannot be overwritten by a
   // generic launch-console render. Keep a fallback for pages without that hook.
@@ -750,7 +773,9 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnectin
   if (lcStep === 0) note.textContent = linked
     ? `Linked${currentStatus().firmwareVersion ? ` · firmware ${currentStatus().firmwareVersion}` : ''}. Continue to the checklist.`
     : 'Pair the NeoLabs controller to begin.';
-  else if (lcStep === 1) note.textContent = 'Confirm every checklist item to enable arming.';
+  else if (lcStep === 1) note.textContent = continuityReady()
+    ? 'Continuity verified. Confirm every checklist item to enable arming.'
+    : 'Arming locked: motor/igniter continuity is required.';
   else if (lcStep === 2) note.textContent = armed ? 'Armed. Continue to the launch step.' : 'Review launch conditions, then arm.';
   else note.textContent = 'Hold for a clear range and airspace, then start the countdown. Abort is always available.';
 }
@@ -782,7 +807,11 @@ function setLaunchState(text, state) {
 /* ─────────────────────────── Helpers / state ─────────────────────────── */
 function allLaunchChecks() {
   const checks = [...document.querySelectorAll('.ble-check')];
-  return checks.length === 0 || checks.every(c => c.checked);
+  return continuityReady() && (checks.length === 0 || checks.every(c => c.checked));
+}
+
+function continuityReady(status = currentStatus()) {
+  return status.continuity === true;
 }
 
 function clearVisibleCode() {
@@ -919,6 +948,8 @@ function formatControllerError(error) {
     disarm: 'Controller disarmed',
     heartbeat_lost: 'Countdown stopped: live heartbeat was lost',
     owner_lost: 'Controller disarmed: BLE owner was lost',
+    no_continuity: 'Arming blocked: motor/igniter circuit is open',
+    continuity_lost: 'Controller safely disarmed: motor/igniter continuity was lost',
     not_owner: 'Controller is armed by a different session — disarm/abort first, then arm again',
     not_armed: 'Command rejected: controller is not armed',
     trigger_active: 'Command rejected: trigger output is already active',
