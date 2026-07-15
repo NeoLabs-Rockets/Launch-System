@@ -2,3 +2,4 @@
 /MissionDashboard/.env
 .DS_Store
 /.pio
+/LaunchSystem/Arduino/Continuity_LED_Test

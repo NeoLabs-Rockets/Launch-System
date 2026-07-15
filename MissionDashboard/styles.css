@@ -424,7 +424,7 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 @media(max-width:760px){.hdr-launch{display:none}}
 
 /* ───────────────────── Dashboard launch summary ───────────────────── */
-.launch-summary-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:4px 0 10px}
+.launch-summary-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:4px 0 10px}
 #launch-summary-card{padding:16px 18px}
 #launch-summary-card .card-head{margin-bottom:10px}
 #launch-summary-card .go-badge{width:82px;height:82px;border-width:2px;animation:none}
@@ -500,7 +500,8 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 .lc-nogo-warn.nogo{background:rgba(255,74,61,.12);border:1px solid rgba(255,74,61,.35);color:var(--red)}
 .lc-nogo-warn.hold{background:rgba(255,179,71,.10);border:1px solid rgba(255,179,71,.3);color:var(--amber)}
 .lc-metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-.lc-panel[data-panel="2"] .lc-metrics{grid-template-columns:repeat(3,1fr)}
+.lc-panel[data-panel="2"] .lc-metrics{grid-template-columns:repeat(4,1fr)}
+.temperature-item .v{color:#8fd8ff;text-shadow:0 0 18px rgba(77,159,255,.22)}
 .lc-metrics .derived-item{min-height:0;padding:12px 14px}
 .lc-countdown-big{font-size:2.8em;font-weight:800;text-align:center;color:#fff;letter-spacing:.04em;
   margin:8px 0 2px;font-variant-numeric:tabular-nums;text-shadow:0 0 26px rgba(255,74,61,.35)}

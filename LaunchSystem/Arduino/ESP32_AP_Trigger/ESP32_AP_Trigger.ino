@@ -1,35 +1,38 @@
 /* NeoLabs Rockets launch controller — BLE only. */
 #include <NimBLEDevice.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 #define RELAY_PIN 23
-#define CONTINUITY_PIN 39
-#define CONTINUITY_ACTIVE_LEVEL HIGH  // GPIO39 needs an external pull-down
+#define CONTINUITY_PIN 34
+#define CONTINUITY_ACTIVE_LEVEL LOW
 #define RED_LED_PIN 26
 #define ARM_PIN -1
-#define VIBRATION_PIN 36
-#if defined(CONFIG_IDF_TARGET_ESP32) && VIBRATION_PIN >= 34 && VIBRATION_PIN <= 39
-  // GPIO34-39 are input-only on the original ESP32. Keep the requested pin in
-  // one place, but never pretend that GPIO36 can drive the motor on this board.
-  #define VIBRATION_OUTPUT_AVAILABLE 0
-#else
-  #define VIBRATION_OUTPUT_AVAILABLE 1
-#endif
+#define BUZZER_PIN 33
+#define TEMPERATURE_PIN 18
 #define LAUNCH_CODE "123456"  // must match MissionDashboard LAUNCH_CODE
 #define MAX_ATTEMPTS 10
 #define TRIGGER_MS 2000UL
 #define COUNTDOWN_TIMEOUT_MS 3000UL
 #define CONTINUITY_DEBOUNCE_MS 60UL
+#define TEMPERATURE_SAMPLE_INTERVAL_MS 1000UL
+#define TEMPERATURE_CONVERSION_MS 750UL
 
 static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
-static const char FIRMWARE_VERSION[] = "2.4.0";
+static const char FIRMWARE_VERSION[] = "2.8.1";
 
 NimBLECharacteristic* statusChar = nullptr;
+OneWire temperatureBus(TEMPERATURE_PIN);
+DallasTemperature temperatureSensors(&temperatureBus);
 bool armed = false, firing = false, countdown = false, locked = false;
 bool continuity = false, continuityRaw = false, continuityOverride = false;
+bool temperatureConversionPending = false;
+float temperatureC = NAN;
 unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0, continuityChangedAt = 0;
+unsigned long temperatureConversionStartedAt = 0, lastTemperatureRequestAt = 0;
 int attempts = 0, connectedCount = 0;
 String ownerSid, lastError;
 
@@ -53,14 +56,10 @@ int jsonInt(const String& src, const char* key, int fallback) {
   return end == start ? fallback : src.substring(start, end).toInt();
 }
 
-void motorPulse(unsigned long ms = 100) {
-#if VIBRATION_OUTPUT_AVAILABLE
-  digitalWrite(VIBRATION_PIN, HIGH);
+void buzzerPulse(unsigned long ms = 100) {
+  digitalWrite(BUZZER_PIN, HIGH);
   delay(ms);
-  digitalWrite(VIBRATION_PIN, LOW);
-#else
-  (void)ms;
-#endif
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 void safeStop(const char* reason) {
@@ -71,15 +70,19 @@ void safeStop(const char* reason) {
   ownerSid = "";
   lastError = reason;
   digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 void publishStatus() {
   if (!statusChar) return;
-  char data[190];
+  char data[220];
+  char temperatureValue[16];
+  if (isnan(temperatureC)) strcpy(temperatureValue, "null");
+  else snprintf(temperatureValue, sizeof(temperatureValue), "%.2f", temperatureC);
   snprintf(data, sizeof(data),
-    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"b\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
-    armed, firing, countdown, locked, continuity, continuityOverride, locked ? 0 : MAX_ATTEMPTS - attempts,
-    connectedCount, millis(), lastError.c_str(), FIRMWARE_VERSION);
+    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"b\":%d,\"t\":%s,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
+    armed, firing, countdown, locked, continuity, continuityOverride, temperatureValue,
+    locked ? 0 : MAX_ATTEMPTS - attempts, connectedCount, millis(), lastError.c_str(), FIRMWARE_VERSION);
   statusChar->setValue((uint8_t*)data, strlen(data));
   statusChar->notify();
   lastNotify = millis();
@@ -109,7 +112,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       publishStatus();
       return;
     }
-    if (cmd == "abort" || cmd == "disarm") { safeStop(""); motorPulse(80); publishStatus(); return; }
+    if (cmd == "abort" || cmd == "disarm") { safeStop(""); buzzerPulse(80); publishStatus(); return; }
     if (cmd == "auth") {
       lastError = jsonString(body, "code") == LAUNCH_CODE ? "auth_ok" : "auth_failed";
       publishStatus();
@@ -141,7 +144,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       ownerSid = sid;
       armed = true;
       countdown = false;
-      motorPulse(100);
+      buzzerPulse(100);
       publishStatus();
       return;
     }
@@ -165,7 +168,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
         countdown = false;
         continuityOverride = false;
         ownerSid = "";
-        motorPulse(120);
+        buzzerPulse(120);
       }
     } else lastError = "unknown_cmd";
     publishStatus();
@@ -176,17 +179,19 @@ void setup() {
   Serial.begin(115200);
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
-  pinMode(CONTINUITY_PIN, INPUT); // GPIO39 has no internal pull-up/down
+  pinMode(CONTINUITY_PIN, INPUT); // External continuity network provides the logic level.
   continuityRaw = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
   continuity = continuityRaw;
   pinMode(RED_LED_PIN, OUTPUT);
   digitalWrite(RED_LED_PIN, LOW);
-#if VIBRATION_OUTPUT_AVAILABLE
-  pinMode(VIBRATION_PIN, OUTPUT);
-  digitalWrite(VIBRATION_PIN, LOW);
-#else
-  Serial.println("[WARN] GPIO36 is input-only on ESP32; vibration output disabled");
-#endif
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  temperatureSensors.begin();
+  temperatureSensors.setWaitForConversion(false);
+  temperatureSensors.requestTemperatures();
+  temperatureConversionPending = true;
+  temperatureConversionStartedAt = millis();
+  lastTemperatureRequestAt = temperatureConversionStartedAt;
 
   NimBLEDevice::init(BLE_NAME);
   NimBLEDevice::setMTU(185);
@@ -209,6 +214,17 @@ void setup() {
 
 void loop() {
   const unsigned long now = millis();
+  if (temperatureConversionPending && now - temperatureConversionStartedAt >= TEMPERATURE_CONVERSION_MS) {
+    const float sample = temperatureSensors.getTempCByIndex(0);
+    temperatureC = sample == DEVICE_DISCONNECTED_C || sample < -55.0f || sample > 125.0f ? NAN : sample;
+    temperatureConversionPending = false;
+    publishStatus();
+  } else if (!temperatureConversionPending && now - lastTemperatureRequestAt >= TEMPERATURE_SAMPLE_INTERVAL_MS) {
+    temperatureSensors.requestTemperatures();
+    temperatureConversionPending = true;
+    temperatureConversionStartedAt = now;
+    lastTemperatureRequestAt = now;
+  }
   const bool sampledContinuity = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
   if (sampledContinuity != continuityRaw) {
     continuityRaw = sampledContinuity;

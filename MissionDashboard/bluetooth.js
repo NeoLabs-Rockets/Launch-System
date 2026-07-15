@@ -39,10 +39,8 @@ let launchHeartbeatGeneration = 0;
 let launchCountdownEndsAt = 0;
 let launchCountdownActive = false;
 let launchCountdownStartedAt = 0;
-let launchLastSpokenSecond = null;
-let launchAudioCtx = null;
-let launchUtterance = null;
-let launchSpeechReady = false;
+let countdownSpokenSecond = null;
+let countdownSpeechUtterance = null;
 let lastLaunchEvent = null;
 const seenSharedLaunchEvents = new Set();
 let launchWakeLock = null;
@@ -139,9 +137,6 @@ function publishPublicApi() {
     close: closeLaunchConsole,
     connected: () => bleLink.connected || sharedState.ownerActive,
     countdownActive: () => launchCountdownActive || sharedCountdownActive,
-    // The BLE-owning page announces its own countdown. Other devices leave
-    // speech to camera.js, which follows the server-relayed countdown.
-    localBleOwner: () => bleLink.connected,
     status: () => bleStatusData || {}
   };
 }
@@ -446,7 +441,6 @@ async function runLaunchCountdownTick() {
   const leftMs = launchCountdownEndsAt - Date.now();
   const left = Math.max(0, Math.ceil(leftMs / 1000));
   broadcastLaunch({ type: 'countdown_tick', left, leftMs: Math.max(0, leftMs), endsAt: launchCountdownEndsAt, mode: 'ble' });
-  speakLaunchSecond(left);
   setText('ble-countdown', left > 0 ? `T-${left}` : 'Ignition');
   setText('ble-countdown-sub', 'BLE heartbeat active');
   if (left <= 0) {
@@ -516,7 +510,6 @@ async function startCountdownWithCode(seconds, code) {
   launchCountdownEndsAt = Date.now() + seconds * 1000;
   launchCountdownActive = true;
   launchCountdownStartedAt = Date.now();
-  launchLastSpokenSecond = null;
   persistActiveLaunch();
   broadcastLaunch({ type: 'countdown_start', seconds, endsAt: launchCountdownEndsAt, mode: 'ble' });
   startLaunchHeartbeat();
@@ -552,7 +545,6 @@ function stopLaunchCountdownUi(reason) {
   launchCountdownTimer = null;
   launchCountdownActive = false;
   launchCountdownStartedAt = 0;
-  launchLastSpokenSecond = null;
   setText('ble-countdown', 'Idle');
   setText('ble-countdown-sub', reason || 'No active sequence');
 }
@@ -571,6 +563,7 @@ function applyBleStatus(s) {
     locked: !!s.l,
     continuity: s.q === 1 || s.q === true,
     continuityOverride: s.b === 1 || s.b === true,
+    temperatureC: Number.isFinite(s.t) ? s.t : null,
     attemptsLeft: s.left,
     clients: s.n || 0,
     uptime: s.u || 0,
@@ -698,6 +691,10 @@ function renderLaunch() {
   setText('ble-clients', status.clients ?? 0);
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
   setText('ble-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Bypassed' : physicalContinuity ? 'Connected' : 'Open circuit');
+  const temperatureText = linked && Number.isFinite(status.temperatureC) ? `${status.temperatureC.toFixed(1)} °C` : '—';
+  const temperatureDetail = linked && Number.isFinite(status.temperatureC) ? 'Live · DS18B20 on GPIO18' : linked ? 'Sensor offline · GPIO18' : 'Waiting for controller';
+  setText('ble-temperature', temperatureText);
+  setText('ble-temperature-sub', temperatureDetail);
   const linkedName = bleLink.connected || reconnecting
     ? (bleLink.deviceName || 'Linked')
     : (sharedState.ownerName || 'Shared BLE link');
@@ -714,6 +711,8 @@ function renderLaunch() {
   setText('ds-link-state', linked ? linkedName : 'Offline');
   setText('ds-armed', locked ? 'Locked' : armed ? 'Yes' : 'No');
   setText('ds-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Ignored' : physicalContinuity ? 'Ready' : 'Open');
+  setText('ds-temperature', temperatureText);
+  setText('ds-temperature-sub', temperatureDetail);
   setText('ds-countdown', countdownLive ? 'Active' : 'Idle');
   setText('ds-countdown-sub', launchCountdownActive ? 'BLE heartbeat live' : sharedCountdownActive ? 'Synchronized from BLE owner' : 'No active sequence');
   setText('ds-clients', serverClientCount);
@@ -732,12 +731,12 @@ function renderLaunch() {
   });
   setText('lc-continuity-title', !linked ? 'Waiting for controller' : continuityBypassed ? 'Continuity check ignored' : physicalContinuity ? 'Motor circuit connected' : 'Motor circuit open');
   setText('lc-continuity-detail', !linked
-    ? 'Continuity is verified by GPIO39 after BLE connects.'
+    ? 'Continuity is verified by GPIO34 after BLE connects.'
     : continuityBypassed
     ? 'Temporary override is active for this launch session.'
     : physicalContinuity
-    ? 'GPIO39 reports a closed ignition circuit. This required check is automatic.'
-    : 'Connect the igniter/motor circuit. Arming remains locked until GPIO39 reports continuity.');
+    ? 'GPIO34 reports a closed ignition circuit. This required check is automatic.'
+    : 'Connect the igniter/motor circuit. Arming remains locked until GPIO34 reports continuity.');
   [el('ble-continuity-override'), el('ds-continuity-override')].forEach(overrideButton => {
     if (!overrideButton) return;
     overrideButton.hidden = !linked || physicalContinuity;
@@ -903,74 +902,58 @@ function primeLaunchSpeech() {
   try {
     speechSynthesis.cancel();
     speechSynthesis.getVoices();
-    launchSpeechReady = true;
-    try {
-      launchAudioCtx = launchAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      if (launchAudioCtx.state === 'suspended') launchAudioCtx.resume();
-    } catch (_) {}
     return true;
   } catch (_) {
     return false;
   }
 }
 
-if ('speechSynthesis' in window) {
-  speechSynthesis.onvoiceschanged = () => { launchSpeechReady = true; };
-}
-
-function speakLaunchSecond(second) {
-  if (!launchCountdownActive || second === launchLastSpokenSecond) return;
-  launchLastSpokenSecond = second;
-  const text = second <= 0 ? 'Ignition' : String(second);
-  if (launchSpeechReady) {
-    try {
-      const utterance = new SpeechSynthesisUtterance(text);
-      const voices = speechSynthesis.getVoices();
-      const voice = voices.find(v => /^en[-_]/i.test(v.lang)) || voices[0];
-      if (voice) utterance.voice = voice;
-      utterance.lang = (voice && voice.lang) || 'en-US';
-      utterance.rate = 1.28;
-      utterance.pitch = second <= 3 ? 1.18 : 1;
-      utterance.volume = 1;
-      // Cancelling an already-idle speech engine for every number can wedge
-      // Chrome/macOS speech synthesis. Only interrupt an utterance that is
-      // genuinely still running late.
-      if (launchUtterance) speechSynthesis.cancel();
-      // Keep a reference until the browser reports completion. Chrome on macOS
-      // can otherwise garbage-collect short utterances before they are spoken.
-      launchUtterance = utterance;
-      utterance.onend = utterance.onerror = () => {
-        if (launchUtterance === utterance) launchUtterance = null;
-      };
-      speechSynthesis.speak(utterance);
-      beepLaunch(second <= 0 ? 440 : 880, second <= 0 ? 0.28 : 0.055);
-      return;
-    } catch (_) {}
+function announceLaunchEvent(message) {
+  if (!message) return;
+  if (message.type === 'abort' || message.type === 'sync_lost') {
+    resetCountdownAnnouncement(true);
+    return;
   }
-  beepLaunch(second <= 0 ? 440 : 880, second <= 0 ? 0.35 : 0.1);
+  if (message.type === 'countdown_start') resetCountdownAnnouncement(false);
+  if (!['countdown_start', 'countdown_tick', 'ignition'].includes(message.type)) return;
+  const remainingMs = Number(message.remainingMs ?? message.leftMs);
+  const second = message.type === 'ignition'
+    ? 0
+    : Number.isFinite(remainingMs)
+      ? (remainingMs <= 0 ? 0 : Math.ceil(remainingMs / 1000))
+      : Math.max(0, Math.ceil(Number(message.left ?? message.seconds) || 0));
+  if (second > 10 || second === countdownSpokenSecond) return;
+  countdownSpokenSecond = second;
+  if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) return;
+  try {
+    const utterance = new SpeechSynthesisUtterance(second <= 0 ? 'Ignition' : String(second));
+    const voices = speechSynthesis.getVoices();
+    const voice = voices.find(candidate => /^en[-_]/i.test(candidate.lang)) || voices[0];
+    if (voice) utterance.voice = voice;
+    utterance.lang = voice?.lang || 'en-US';
+    utterance.rate = 1.3;
+    utterance.pitch = second <= 3 ? 1.16 : 1;
+    utterance.volume = 1;
+    if (countdownSpeechUtterance) speechSynthesis.cancel();
+    countdownSpeechUtterance = utterance;
+    utterance.onend = utterance.onerror = () => {
+      if (countdownSpeechUtterance === utterance) countdownSpeechUtterance = null;
+    };
+    speechSynthesis.speak(utterance);
+  } catch (_) {}
 }
 
-function beepLaunch(freq, duration) {
+function resetCountdownAnnouncement(cancelActive) {
+  countdownSpokenSecond = null;
+  if (!cancelActive) return;
   try {
-    launchAudioCtx = launchAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = launchAudioCtx.createOscillator();
-    const gain = launchAudioCtx.createGain();
-    osc.frequency.value = freq;
-    osc.type = 'sine';
-    gain.gain.value = 0.04;
-    osc.connect(gain);
-    gain.connect(launchAudioCtx.destination);
-    osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.001, launchAudioCtx.currentTime + duration);
-    osc.stop(launchAudioCtx.currentTime + duration);
+    if (countdownSpeechUtterance && 'speechSynthesis' in window) speechSynthesis.cancel();
   } catch (_) {}
+  countdownSpeechUtterance = null;
 }
 
 function cancelLaunchSpeech() {
-  try {
-    if ('speechSynthesis' in window) speechSynthesis.cancel();
-    launchUtterance = null;
-  } catch (_) {}
+  resetCountdownAnnouncement(true);
 }
 
 function isValidCode(code) {
@@ -1006,6 +989,7 @@ function broadcastLaunch(payload) {
     source: 'launch-dashboard',
     at: Date.now()
   };
+  announceLaunchEvent(message);
   if (durable) lastLaunchEvent = message;
   try { LAUNCH_CHANNEL?.postMessage(message); } catch (_) {}
   try { localStorage.setItem('neolabs.launch.lastEvent', JSON.stringify(message)); } catch (_) {}
@@ -1190,8 +1174,10 @@ function applySharedCountdownState(countdownState, notifyCamera = false) {
       setText('ble-countdown', 'Idle');
       setText('ble-countdown-sub', 'No active sequence');
     }
-    if (notifyCamera && wasActive && typeof window.NeoCameraLaunchEvent === 'function') {
-      window.NeoCameraLaunchEvent({ type: 'sync_lost', source: 'launch-dashboard', at: Date.now() });
+    if (notifyCamera && wasActive) {
+      const message = { type: 'sync_lost', source: 'launch-dashboard', at: Date.now() };
+      announceLaunchEvent(message);
+      if (typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
     }
     return;
   }
@@ -1205,13 +1191,15 @@ function applySharedCountdownState(countdownState, notifyCamera = false) {
     : Math.max(0, Math.ceil((sharedCountdownEndsAt - Date.now()) / 1000));
   setText('ble-countdown', left > 0 ? `T-${left}` : 'Ignition');
   setText('ble-countdown-sub', 'Synchronized from BLE owner');
-  if (notifyCamera && !wasActive && typeof window.NeoCameraLaunchEvent === 'function') {
-    window.NeoCameraLaunchEvent({
+  if (notifyCamera && !wasActive) {
+    const message = {
       type: 'countdown_start', source: 'launch-dashboard', at: Date.now(),
       seconds: Math.max(1, Math.ceil(Math.max(0, sharedCountdownEndsAt - Date.now()) / 1000)),
       endsAt: sharedCountdownEndsAt,
       remainingMs: Math.max(0, sharedCountdownEndsAt - Date.now())
-    });
+    };
+    announceLaunchEvent(message);
+    if (typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
   }
 }
 
@@ -1237,6 +1225,7 @@ function deliverSharedLaunchEvent(message) {
     seenSharedLaunchEvents.add(eventId);
     if (seenSharedLaunchEvents.size > 100) seenSharedLaunchEvents.delete(seenSharedLaunchEvents.values().next().value);
   }
+  announceLaunchEvent(message);
   applySharedLaunchEvent(message);
   if (typeof window.NeoCameraLaunchEvent === 'function') window.NeoCameraLaunchEvent(message);
   return true;

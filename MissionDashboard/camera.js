@@ -36,8 +36,6 @@
   let countdownAudioCtx = null;
   let countdownAudioDest = null;
   let lastCountdownSpoken = null;
-  let countdownUtterance = null;
-  let speechPrimed = false;
   let showTelemetry = true;
   const seenLaunchEventIds = new Set();
 
@@ -122,7 +120,6 @@
       if (seenLaunchEventIds.size > 100) seenLaunchEventIds.delete(seenLaunchEventIds.values().next().value);
     }
     if (data.type === 'countdown_start') {
-      cancelCountdownSpeech();
       lastCountdownSpoken = null;
       ignitionAt = 0;
       const remainingMs = syncedRemainingMs(data);
@@ -148,14 +145,12 @@
       externalCountdownActive = true; // keep drawing T+ until recording stops
       setText('cam-count-state', 'T+0:00 — Liftoff');
     } else if (data.type === 'abort') {
-      cancelCountdownSpeech();
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
       lastCountdownSpoken = null;
       setText('cam-count-state', 'Aborted');
     } else if (data.type === 'sync_lost') {
-      cancelCountdownSpeech();
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
@@ -784,14 +779,9 @@
     const second = leftMs <= 0 ? 0 : Math.ceil(leftMs / 1000);
     if (second > 10 || second === lastCountdownSpoken) return;
     lastCountdownSpoken = second;
-    // bluetooth.js is the sole speech owner on the machine holding the direct
-    // BLE link. The camera speaks only on synchronized viewer devices. Having
-    // both pipelines use the same global speechSynthesis instance caused each
-    // number to be announced twice, mutual cancellation around T-8, and a
-    // wedged engine on the following launch.
-    if (window.NeoLaunch?.localBleOwner?.()) return;
+    // This cue is routed only into the recorded overlay audio track. Global
+    // audible TTS is owned by bluetooth.js on every dashboard view.
     playRecordedCountdownCue(second);
-    speakOverSpeaker(second);
   }
 
   function playRecordedCountdownCue(second) {
@@ -805,40 +795,11 @@
       gain.gain.value = second <= 0 ? 0.12 : 0.055;
       osc.connect(gain);
       gain.connect(countdownAudioDest);
-      gain.connect(countdownAudioCtx.destination);
       const duration = second <= 0 ? 0.42 : 0.12;
       osc.start();
       gain.gain.exponentialRampToValueAtTime(0.001, countdownAudioCtx.currentTime + duration);
       osc.stop(countdownAudioCtx.currentTime + duration);
     } catch (_) {}
-  }
-
-  function speakOverSpeaker(second) {
-    if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) return;
-    try {
-      if (!speechPrimed) { speechSynthesis.cancel(); speechSynthesis.getVoices(); speechPrimed = true; }
-      const utterance = new SpeechSynthesisUtterance(second <= 0 ? 'Ignition' : String(second));
-      const voices = speechSynthesis.getVoices();
-      const voice = voices.find(v => /^en[-_]/i.test(v.lang)) || voices[0];
-      if (voice) utterance.voice = voice;
-      utterance.lang = (voice && voice.lang) || 'en-US';
-      utterance.rate = 1.32;
-      utterance.pitch = second <= 3 ? 1.15 : 1;
-      utterance.volume = 1;
-      if (countdownUtterance) speechSynthesis.cancel();
-      countdownUtterance = utterance;
-      utterance.onend = utterance.onerror = () => {
-        if (countdownUtterance === utterance) countdownUtterance = null;
-      };
-      speechSynthesis.speak(utterance);
-    } catch (_) {}
-  }
-
-  function cancelCountdownSpeech() {
-    try {
-      if (countdownUtterance && 'speechSynthesis' in window) speechSynthesis.cancel();
-    } catch (_) {}
-    countdownUtterance = null;
   }
 
   function setStatus(title, detail, state) {
