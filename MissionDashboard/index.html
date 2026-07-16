@@ -700,6 +700,17 @@
       <div class="sp-dr"><span class="sp-dk">Recovery Drift At Safe Wind</span><span class="sp-dv" id="sp-drift">—</span></div>
     </div>
 
+    <div class="sp-sec">Controller Firmware</div>
+    <div class="firmware-update-card" id="firmware-update-card">
+      <div class="sp-dr"><span class="sp-dk">Installed</span><span class="sp-dv" id="firmware-current">Not connected</span></div>
+      <div class="sp-dr"><span class="sp-dk">Available</span><span class="sp-dv" id="firmware-available">Check for updates</span></div>
+      <div class="firmware-progress" id="firmware-progress" hidden>
+        <div class="firmware-progress-fill" id="firmware-progress-fill"></div>
+      </div>
+      <div class="sp-help" id="firmware-update-status">Connect this dashboard directly to the launch controller to update it.</div>
+      <button class="sp-save" id="firmware-update" type="button" disabled>Check &amp; Update</button>
+    </div>
+
     <button class="sp-save" id="settings-save" type="button">Save Current Profile</button>
   </div>
 </aside>

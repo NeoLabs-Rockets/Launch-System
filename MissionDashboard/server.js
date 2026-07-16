@@ -31,6 +31,11 @@ const RECORDING_CACHE_DIR = path.join(DATA_DIR, 'recording-cache');
 const AIRCRAFT_CACHE_TTL_MS = 30 * 1000;
 const AIRCRAFT_STALE_TTL_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = [200, 600, 1200];
+const FIRMWARE_GITHUB_REPOSITORY = process.env.FIRMWARE_GITHUB_REPOSITORY || 'NeoLabs-Rockets/Launch-System';
+const FIRMWARE_RELEASE_TAG = process.env.FIRMWARE_RELEASE_TAG || 'firmware-latest';
+const FIRMWARE_RELEASE_CACHE_TTL_MS = 60 * 1000;
+const FIRMWARE_BINARY_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_FIRMWARE_BYTES = 0x140000;
 const OVERPASS_CACHE_TTL_MS = 15 * 60 * 1000;
 const OVERPASS_STALE_TTL_MS = 60 * 60 * 1000;
 const OVERPASS_ENDPOINTS = [
@@ -46,6 +51,8 @@ const AUTH_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
 const authFailures = new Map();
 let cachePersistTimer = null;
+let firmwareReleaseCache = null;
+let firmwareBinaryCache = null;
 
 // SSE clients for cross-device launch event relay
 const sseClients = new Map();
@@ -190,6 +197,83 @@ function scheduleCachePersist() {
   if (cachePersistTimer) return;
   cachePersistTimer = setTimeout(persistCaches, 1000);
   cachePersistTimer.unref();
+}
+
+function validateFirmwareManifest(value) {
+  if (!value || value.schemaVersion !== 1) throw new Error('unsupported_manifest_schema');
+  if (typeof value.version !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,62}$/.test(value.version)) {
+    throw new Error('invalid_firmware_version');
+  }
+  if (typeof value.commit !== 'string' || !/^[0-9a-f]{40}$/.test(value.commit)) throw new Error('invalid_firmware_commit');
+  if (value.environment !== 'esp32dev') throw new Error('wrong_firmware_environment');
+  if (!Number.isSafeInteger(value.size) || value.size <= 0 || value.size > MAX_FIRMWARE_BYTES) {
+    throw new Error('invalid_firmware_size');
+  }
+  if (typeof value.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.sha256)) throw new Error('invalid_firmware_sha256');
+  if (value.asset !== 'firmware.bin') throw new Error('invalid_firmware_asset');
+  if (typeof value.publishedAt !== 'string' || !Number.isFinite(Date.parse(value.publishedAt))) {
+    throw new Error('invalid_firmware_timestamp');
+  }
+  return {
+    schemaVersion: 1,
+    version: value.version,
+    commit: value.commit,
+    environment: value.environment,
+    size: value.size,
+    sha256: value.sha256,
+    asset: value.asset,
+    publishedAt: value.publishedAt
+  };
+}
+
+async function githubFirmwareFetch(url, responseType = 'json') {
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'NeoLabs-Mission-Dashboard',
+      'X-GitHub-Api-Version': '2022-11-28'
+    },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(12000)
+  });
+  if (!response.ok) throw new Error(`github_${response.status}`);
+  return responseType === 'buffer' ? Buffer.from(await response.arrayBuffer()) : response.json();
+}
+
+async function latestFirmwareRelease(force = false) {
+  if (!force && firmwareReleaseCache?.expiresAt > Date.now()) return firmwareReleaseCache;
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(FIRMWARE_GITHUB_REPOSITORY)) {
+    throw new Error('invalid_firmware_repository_configuration');
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(FIRMWARE_RELEASE_TAG)) throw new Error('invalid_firmware_tag_configuration');
+  const releaseUrl = `https://api.github.com/repos/${FIRMWARE_GITHUB_REPOSITORY}/releases/tags/${encodeURIComponent(FIRMWARE_RELEASE_TAG)}`;
+  const release = await githubFirmwareFetch(releaseUrl);
+  const manifestAsset = release.assets?.find(asset => asset.name === 'manifest.json');
+  const binaryAsset = release.assets?.find(asset => asset.name === 'firmware.bin');
+  if (!manifestAsset?.browser_download_url || !binaryAsset?.browser_download_url) throw new Error('firmware_release_assets_missing');
+  const manifest = validateFirmwareManifest(await githubFirmwareFetch(manifestAsset.browser_download_url));
+  if (Number(binaryAsset.size) !== manifest.size) throw new Error('firmware_release_size_mismatch');
+  firmwareReleaseCache = {
+    manifest,
+    binaryUrl: binaryAsset.browser_download_url,
+    expiresAt: Date.now() + FIRMWARE_RELEASE_CACHE_TTL_MS
+  };
+  if (firmwareBinaryCache?.sha256 !== manifest.sha256) firmwareBinaryCache = null;
+  return firmwareReleaseCache;
+}
+
+async function latestFirmwareBinary(expectedSha) {
+  const release = await latestFirmwareRelease();
+  if (expectedSha && expectedSha !== release.manifest.sha256) throw new Error('firmware_release_changed');
+  if (firmwareBinaryCache?.sha256 === release.manifest.sha256 && firmwareBinaryCache.expiresAt > Date.now()) {
+    return { manifest: release.manifest, buffer: firmwareBinaryCache.buffer };
+  }
+  const buffer = await githubFirmwareFetch(release.binaryUrl, 'buffer');
+  if (buffer.length !== release.manifest.size || buffer.length > MAX_FIRMWARE_BYTES) throw new Error('firmware_binary_size_mismatch');
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  if (sha256 !== release.manifest.sha256) throw new Error('firmware_binary_sha_mismatch');
+  firmwareBinaryCache = { sha256, buffer, expiresAt: Date.now() + FIRMWARE_BINARY_CACHE_TTL_MS };
+  return { manifest: release.manifest, buffer };
 }
 
 loadPersistentCaches();
@@ -337,6 +421,36 @@ app.post('/api/auth/owner/release', (req, res) => {
   };
   emitLaunch({ type: 'shared_state', state: publicLaunchState() });
   res.json({ ok: true });
+});
+
+app.get('/api/firmware/latest', async (req, res) => {
+  try {
+    const { manifest } = await latestFirmwareRelease();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ...manifest, downloadUrl: '/api/firmware/latest.bin' });
+  } catch (error) {
+    console.warn('[firmware] release lookup failed:', error.message);
+    const unavailable = /^github_(404|403)$/.test(error.message);
+    res.status(unavailable ? 503 : 502).json({ error: error.message });
+  }
+});
+
+app.get('/api/firmware/latest.bin', async (req, res) => {
+  const expectedSha = String(req.query.sha256 || '');
+  if (!/^[0-9a-f]{64}$/.test(expectedSha)) return res.status(400).json({ error: 'valid_sha256_required' });
+  try {
+    const { manifest, buffer } = await latestFirmwareBinary(expectedSha);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Firmware-Version', manifest.version);
+    res.setHeader('X-Firmware-SHA256', manifest.sha256);
+    res.send(buffer);
+  } catch (error) {
+    console.warn('[firmware] binary download failed:', error.message);
+    const changed = error.message === 'firmware_release_changed';
+    res.status(changed ? 409 : 502).json({ error: error.message });
+  }
 });
 app.use('/api', requireAuth);
 

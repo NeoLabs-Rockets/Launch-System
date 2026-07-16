@@ -63,6 +63,11 @@ let authVerificationQueue = Promise.resolve();
 let remoteCommandQueue = Promise.resolve();
 let joinAuthorized = false;
 let serverClientCount = 1;
+let firmwareUpdateBusy = false;
+let firmwareAvailableVersion = '';
+let firmwareUpdateMessage = '';
+let firmwareUpdateTone = '';
+let firmwareProgressPercent = 0;
 
 // Launch Console wizard state
 let lcStep = 0;
@@ -111,6 +116,7 @@ function bindBleUi() {
   on('ble-abort', 'click', abortLaunchCountdown);
   on('ble-continuity-override', 'click', toggleContinuityOverride);
   on('ds-continuity-override', 'click', toggleContinuityOverride);
+  on('firmware-update', 'click', runFirmwareUpdate);
   document.querySelectorAll('.ble-check,#ble-code,#ble-count-seconds').forEach(el => {
     el.addEventListener('input', () => { renderLaunch(); });
     el.addEventListener('change', () => { renderLaunch(); });
@@ -190,6 +196,7 @@ function goStep(n) {
 function wireBleLink() {
   bleLink.on('state', handleLinkState);
   bleLink.on('status', applyBleStatus);
+  bleLink.on('ota-status', handleOtaStatus);
   bleLink.on('health', ({ staleMs }) => {
     if (staleMs > 3500) setLaunchState('BLE status stale — waiting for ESP32', 'warn');
   });
@@ -206,6 +213,7 @@ function handleLinkState(detail) {
     onBleLinkDown(detail);
   }
   renderLaunch();
+  renderFirmwareUpdate();
 }
 
 async function onBleLinkUp() {
@@ -240,7 +248,9 @@ function onBleReconnecting(detail) {
   // countdown expires, the tick loop resumes heartbeats automatically.
   stopLaunchHeartbeat();
   const attempt = detail.attempt ? ` (attempt ${detail.attempt})` : '';
-  setLaunchState(`BLE dropped — reconnecting${attempt}…`, 'warn');
+  setLaunchState(detail.reason === 'ota_reboot'
+    ? `Firmware installed — waiting for controller reboot${attempt}…`
+    : `BLE dropped — reconnecting${attempt}…`, 'warn');
   storeBleState();
   publishOwnerSnapshot();
 }
@@ -598,6 +608,108 @@ function applyBleStatus(s) {
   renderLaunch();
 }
 
+function handleOtaStatus(status) {
+  if (!firmwareUpdateBusy) return;
+  const received = Number(status?.received) || 0;
+  const total = Number(status?.total) || 0;
+  if (total > 0) firmwareProgressPercent = Math.min(100, Math.round(received / total * 100));
+  if (status?.state === 'ready') firmwareUpdateMessage = 'Controller ready — transferring firmware…';
+  else if (status?.state === 'receiving') firmwareUpdateMessage = `Installing firmware… ${firmwareProgressPercent}%`;
+  else if (status?.state === 'complete') firmwareUpdateMessage = 'Firmware verified — controller restarting…';
+  else if (status?.state === 'error') {
+    firmwareUpdateMessage = `Update failed: ${status.error || 'controller rejected firmware'}`;
+    firmwareUpdateTone = 'error';
+  }
+  renderFirmwareUpdate();
+}
+
+async function runFirmwareUpdate() {
+  const status = bleStatusData || {};
+  if (firmwareUpdateBusy || !bleLink.connected || !bleLink.otaSupported) return;
+  if (status.armed || status.trigger || status.countdown) {
+    firmwareUpdateMessage = 'Disarm the controller and stop the countdown before updating.';
+    firmwareUpdateTone = 'error';
+    renderFirmwareUpdate();
+    return;
+  }
+
+  firmwareUpdateBusy = true;
+  firmwareUpdateTone = '';
+  firmwareProgressPercent = 0;
+  firmwareUpdateMessage = 'Checking the rolling firmware release…';
+  renderFirmwareUpdate();
+  try {
+    const metadataResponse = await fetch('/api/firmware/latest', { cache: 'no-store' });
+    const metadata = await metadataResponse.json().catch(() => ({}));
+    if (!metadataResponse.ok) throw new Error(metadata.error || `release lookup failed (${metadataResponse.status})`);
+    firmwareAvailableVersion = metadata.version;
+    renderFirmwareUpdate();
+    if (status.firmwareVersion === metadata.version) {
+      firmwareUpdateMessage = 'Controller firmware is already up to date.';
+      firmwareProgressPercent = 100;
+      return;
+    }
+
+    firmwareUpdateMessage = `Downloading ${formatFirmwareBytes(metadata.size)}…`;
+    renderFirmwareUpdate();
+    const binaryResponse = await fetch(`${metadata.downloadUrl}?sha256=${encodeURIComponent(metadata.sha256)}`, { cache: 'no-store' });
+    if (!binaryResponse.ok) {
+      const detail = await binaryResponse.json().catch(() => ({}));
+      throw new Error(detail.error || `firmware download failed (${binaryResponse.status})`);
+    }
+    const firmware = new Uint8Array(await binaryResponse.arrayBuffer());
+    const digest = await crypto.subtle.digest('SHA-256', firmware);
+    const actualSha = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    if (firmware.byteLength !== metadata.size || actualSha !== metadata.sha256) {
+      throw new Error('downloaded firmware failed integrity validation');
+    }
+
+    firmwareUpdateMessage = 'Starting safe Bluetooth installation…';
+    renderFirmwareUpdate();
+    await bleLink.installFirmware(metadata, firmware);
+    await bleLink.waitForFirmwareVersion(metadata.version);
+    firmwareProgressPercent = 100;
+    firmwareUpdateMessage = `Updated successfully to ${metadata.version}.`;
+    firmwareUpdateTone = 'success';
+  } catch (error) {
+    firmwareUpdateMessage = `Update failed: ${error?.message || error}`;
+    firmwareUpdateTone = 'error';
+  } finally {
+    firmwareUpdateBusy = false;
+    renderFirmwareUpdate();
+  }
+}
+
+function renderFirmwareUpdate() {
+  const card = el('firmware-update-card');
+  const button = el('firmware-update');
+  if (!card || !button) return;
+  const status = bleStatusData || {};
+  const safeIdle = !status.armed && !status.trigger && !status.countdown;
+  setText('firmware-current', bleLink.connected ? (status.firmwareVersion || 'Reading…') : 'Not connected');
+  setText('firmware-available', firmwareAvailableVersion || 'Check for updates');
+  const defaultMessage = !bleLink.connected
+    ? 'Connect this dashboard directly to the launch controller to update it.'
+    : !bleLink.otaSupported
+    ? 'This controller needs one initial USB flash before Bluetooth updates are available.'
+    : !safeIdle
+    ? 'Disarm the controller and stop all launch activity before updating.'
+    : 'The controller will remain safely disabled during installation and restart automatically.';
+  setText('firmware-update-status', firmwareUpdateMessage || defaultMessage);
+  button.disabled = firmwareUpdateBusy || !bleLink.connected || !bleLink.otaSupported || !safeIdle;
+  button.textContent = firmwareUpdateBusy ? 'Updating…' : 'Check & Update';
+  const progress = el('firmware-progress');
+  if (progress) progress.hidden = !firmwareUpdateBusy && firmwareProgressPercent === 0;
+  const fill = el('firmware-progress-fill');
+  if (fill) fill.style.width = `${firmwareProgressPercent}%`;
+  card.classList.toggle('updating', firmwareUpdateBusy);
+  card.classList.toggle('error', firmwareUpdateTone === 'error');
+}
+
+function formatFirmwareBytes(bytes) {
+  return `${(Number(bytes) / 1024).toFixed(0)} KB`;
+}
+
 let ownerConflictAt = 0;
 function publishOwnerSnapshot() {
   if (!bleLink.connected && bleLink.state !== 'reconnecting') return;
@@ -666,12 +778,14 @@ function renderLaunch() {
   const hasContinuity = continuityReady(status);
   const overTemperature = linked && temperatureInterlockActive(status);
   const bluetoothSupported = NeoBleLink.supported();
+  const otaBusy = bleLink.otaInProgress;
+  renderFirmwareUpdate();
 
   // Buttons
   const connect = el('ble-connect');
   if (connect) {
     const foreignOwner = sharedState.ownerActive && !sharedState.youAreOwner && !bleLink.connected && !reconnecting;
-    connect.disabled = !bluetoothSupported || connecting || bleLink.connected || foreignOwner;
+    connect.disabled = !bluetoothSupported || connecting || bleLink.connected || foreignOwner || otaBusy;
     connect.textContent = reconnecting
       ? 'Retry now'
       : connecting
@@ -686,11 +800,11 @@ function renderLaunch() {
   // controller (remote routing would loop back to this browser), so gate the
   // action buttons until the automatic restore has relinked.
   const selfOwnerDown = !!sharedState.youAreOwner && !bleLink.connected;
-  setDisabled('ble-disconnect', !bleLink.connected && !reconnecting && !connecting);
-  setDisabled('ble-arm', !linked || armed || locked || overTemperature || !checklistReady || reconnecting || selfOwnerDown);
-  setDisabled('ble-disarm', !linked || !armed || reconnecting || selfOwnerDown);
-  setDisabled('ble-launch', !linked || !armed || locked || overTemperature || countdownLive || reconnecting || selfOwnerDown);
-  setDisabled('ble-abort', !linked || (!armed && !countdownLive));
+  setDisabled('ble-disconnect', otaBusy || (!bleLink.connected && !reconnecting && !connecting));
+  setDisabled('ble-arm', otaBusy || !linked || armed || locked || overTemperature || !checklistReady || reconnecting || selfOwnerDown);
+  setDisabled('ble-disarm', otaBusy || !linked || !armed || reconnecting || selfOwnerDown);
+  setDisabled('ble-launch', otaBusy || !linked || !armed || locked || overTemperature || countdownLive || reconnecting || selfOwnerDown);
+  setDisabled('ble-abort', otaBusy || !linked || (!armed && !countdownLive));
 
   // Modal metrics
   setText('ble-armed', armed ? 'Yes' : 'No');
@@ -709,8 +823,8 @@ function renderLaunch() {
   // Modal status badge
   const badge = el('ble-go-badge');
   const label = el('ble-go-label');
-  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
-  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+  if (badge) badge.className = `go-badge ${!linked || reconnecting || otaBusy ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (label) label.textContent = otaBusy ? 'UPDATE' : !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
 
   // Dashboard summary card
   setText('ds-link', el('ble-state')?.textContent || (linked ? 'Linked' : 'Not connected'));
@@ -724,8 +838,8 @@ function renderLaunch() {
   setText('ds-clients', serverClientCount);
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
-  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting || otaBusy ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (dsLabel) dsLabel.textContent = otaBusy ? 'UPDATE' : !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
 
   [el('ds-temperature')?.closest('.temperature-item'), el('ble-temperature')?.closest('.temperature-item')].forEach(card => {
     if (card) card.classList.toggle('temperature-hot', overTemperature);

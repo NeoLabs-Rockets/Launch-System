@@ -13,6 +13,8 @@ services:
       NODE_ENV: production
       PORT: 3456
       DATA_DIR: /app/data
+      FIRMWARE_GITHUB_REPOSITORY: "${FIRMWARE_GITHUB_REPOSITORY:-NeoLabs-Rockets/Launch-System}"
+      FIRMWARE_RELEASE_TAG: "${FIRMWARE_RELEASE_TAG:-firmware-latest}"
     ports:
       - "${DASHBOARD_PORT:-3456}:3456"
     volumes:

@@ -16,6 +16,7 @@
     'status' parsed controller status JSON (raw {a,f,c,l,q,b,t,left,n,u,e,v};
                                              q = continuity, b = temporary bypass,
                                              t = 10 kΩ B3950 NTC temperature in °C or null)
+    'ota-status' { state, received, total, error, version }
     'health' { staleMs } while connected (controller notifies every ~1 s)
 */
 (function () {
@@ -24,6 +25,9 @@
   const SERVICE_UUID = '8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000';
   const COMMAND_UUID = '8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000';
   const STATUS_UUID = '8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000';
+  const OTA_CONTROL_UUID = '8f3a0004-7b2f-4f8a-9d0e-0c5b6f0a1000';
+  const OTA_DATA_UUID = '8f3a0005-7b2f-4f8a-9d0e-0c5b6f0a1000';
+  const OTA_STATUS_UUID = '8f3a0006-7b2f-4f8a-9d0e-0c5b6f0a1000';
 
   const CONNECT_TIMEOUT_MS = 10000;
   const WRITE_TIMEOUT_MS = 4000;
@@ -31,6 +35,9 @@
   const STALE_DEAD_MS = 8000;
   const RECONNECT_DELAYS_MS = [300, 700, 1500, 3000, 6000, 10000];
   const MAX_RECONNECT_ATTEMPTS = 20;
+  const OTA_CHUNK_BYTES = 160;
+  const OTA_WINDOW_CHUNKS = 16;
+  const OTA_ACK_TIMEOUT_MS = 10000;
   const NAME_KEY = 'neolabs.ble.deviceName';
 
   function withTimeout(promise, ms, label) {
@@ -63,6 +70,13 @@
 
       this._command = null;
       this._statusChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this._otaStatus = null;
+      this._otaWaiters = new Set();
+      this._otaInProgress = false;
+      this._expectedOtaReboot = false;
       this._writeChain = Promise.resolve();
       this._writeFailures = 0;
       this._listeners = new Map();
@@ -76,6 +90,7 @@
       this._wakeReconnect = null;
       this._onGattDisconnected = () => this._handleDrop('gatt_disconnected');
       this._onNotifyBound = event => this._onNotify(event);
+      this._onOtaNotifyBound = event => this._onOtaNotify(event);
 
       // Returning to a backgrounded tab should retry immediately instead of
       // sitting out the remainder of a long backoff window.
@@ -94,6 +109,14 @@
 
     get deviceName() {
       return this.device?.name || this.lastKnownName || '';
+    }
+
+    get otaSupported() {
+      return !!(this._otaControl && this._otaData && this._otaStatusChar);
+    }
+
+    get otaInProgress() {
+      return this._otaInProgress || this._expectedOtaReboot;
     }
 
     on(event, fn) {
@@ -165,18 +188,40 @@
       const service = await withTimeout(server.getPrimaryService(SERVICE_UUID), CONNECT_TIMEOUT_MS, 'BLE service discovery');
       const command = await withTimeout(service.getCharacteristic(COMMAND_UUID), CONNECT_TIMEOUT_MS, 'BLE command lookup');
       const statusChar = await withTimeout(service.getCharacteristic(STATUS_UUID), CONNECT_TIMEOUT_MS, 'BLE status lookup');
+      let otaControl = null;
+      let otaData = null;
+      let otaStatusChar = null;
+      try {
+        [otaControl, otaData, otaStatusChar] = await Promise.all([
+          service.getCharacteristic(OTA_CONTROL_UUID),
+          service.getCharacteristic(OTA_DATA_UUID),
+          service.getCharacteristic(OTA_STATUS_UUID)
+        ]);
+      } catch (_) {
+        // Controllers flashed before BLE OTA support remain fully usable and
+        // are surfaced to Settings as requiring a one-time USB update.
+      }
       if (seq !== this._connectSeq) throw new Error('connection attempt superseded');
       statusChar.removeEventListener('characteristicvaluechanged', this._onNotifyBound);
       statusChar.addEventListener('characteristicvaluechanged', this._onNotifyBound);
       await withTimeout(statusChar.startNotifications(), CONNECT_TIMEOUT_MS, 'BLE notifications');
+      if (otaStatusChar) {
+        otaStatusChar.removeEventListener('characteristicvaluechanged', this._onOtaNotifyBound);
+        otaStatusChar.addEventListener('characteristicvaluechanged', this._onOtaNotifyBound);
+        await withTimeout(otaStatusChar.startNotifications(), CONNECT_TIMEOUT_MS, 'OTA notifications');
+      }
       if (seq !== this._connectSeq) throw new Error('connection attempt superseded');
 
       this._command = command;
       this._statusChar = statusChar;
+      this._otaControl = otaControl;
+      this._otaData = otaData;
+      this._otaStatusChar = otaStatusChar;
+      this._otaStatus = null;
       this._writeChain = Promise.resolve();
       this._writeFailures = 0;
       this.lastActivityAt = Date.now();
-      this._setState('connected', { deviceName: this.deviceName });
+      this._setState('connected', { deviceName: this.deviceName, otaReconnected: this._expectedOtaReboot });
       this._startPing();
       this._startWatchdog();
       this.send({ cmd: 'status' }).catch(() => {});
@@ -190,8 +235,13 @@
       this._stopWatchdog();
       this._command = null;
       this._statusChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this._rejectOtaWaiters(new Error(this._expectedOtaReboot ? 'Controller restarting' : 'BLE disconnected during update'));
       try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch (_) {}
-      this._setState('reconnecting', { reason, attempt: 0, nextRetryMs: RECONNECT_DELAYS_MS[0] });
+      const dropReason = this._expectedOtaReboot ? 'ota_reboot' : reason;
+      this._setState('reconnecting', { reason: dropReason, attempt: 0, nextRetryMs: RECONNECT_DELAYS_MS[0] });
       this._reconnectLoop();
     }
 
@@ -202,7 +252,11 @@
       const device = this.device;
       for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
         const wait = RECONNECT_DELAYS_MS[Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1)];
-        this._setState('reconnecting', { attempt, nextRetryMs: wait });
+        this._setState('reconnecting', {
+          reason: this._expectedOtaReboot ? 'ota_reboot' : 'gatt_disconnected',
+          attempt,
+          nextRetryMs: wait
+        });
         await this._reconnectSleep(wait);
         if (token !== this._reconnectToken) { this._reconnecting = false; return; }
         try {
@@ -236,6 +290,7 @@
 
     disconnect() {
       this._intentional = true;
+      this._expectedOtaReboot = false;
       this._cancelReconnect();
       this._connectSeq++;
       this._teardown();
@@ -254,6 +309,10 @@
       try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch (_) {}
       this._command = null;
       this._statusChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this._rejectOtaWaiters(new Error('BLE disconnected'));
     }
 
     /* ── I/O ─────────────────────────────────────────────────────────────── */
@@ -285,6 +344,109 @@
       return run;
     }
 
+    async installFirmware(manifest, firmwareBytes) {
+      if (this.state !== 'connected') throw new Error('BLE not connected');
+      if (!this.otaSupported) throw new Error('Controller requires a one-time USB firmware update');
+      if (this._otaInProgress) throw new Error('Firmware update already in progress');
+      const bytes = firmwareBytes instanceof Uint8Array ? firmwareBytes : new Uint8Array(firmwareBytes);
+      if (!manifest || bytes.byteLength !== manifest.size) throw new Error('Firmware size does not match manifest');
+
+      this._otaInProgress = true;
+      this._otaStatus = null;
+      this.setPingSuspended(true);
+      try {
+        await this._writeOtaControl({
+          cmd: 'begin',
+          size: manifest.size,
+          sha256: manifest.sha256,
+          version: manifest.version
+        });
+        await this._waitForOtaStatus(status => status.state === 'ready' || status.state === 'error');
+        this._throwForOtaError();
+
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const windowEnd = Math.min(bytes.byteLength, offset + OTA_CHUNK_BYTES * OTA_WINDOW_CHUNKS);
+          while (offset < windowEnd) {
+            const payloadEnd = Math.min(bytes.byteLength, offset + OTA_CHUNK_BYTES);
+            const packet = new Uint8Array(4 + payloadEnd - offset);
+            new DataView(packet.buffer).setUint32(0, offset, true);
+            packet.set(bytes.subarray(offset, payloadEnd), 4);
+            const write = this._otaData.writeValueWithoutResponse
+              ? this._otaData.writeValueWithoutResponse(packet)
+              : this._otaData.writeValueWithResponse(packet);
+            await withTimeout(write, WRITE_TIMEOUT_MS, 'OTA data write');
+            offset = payloadEnd;
+          }
+          await this._writeOtaControl({ cmd: 'status' });
+          await this._waitForOtaStatus(status => status.state === 'error' || Number(status.received) >= offset);
+          this._throwForOtaError();
+        }
+
+        this._expectedOtaReboot = true;
+        await this._writeOtaControl({ cmd: 'finish' });
+        await this._waitForOtaStatus(status => status.state === 'complete' || status.state === 'error');
+        this._throwForOtaError();
+        return this._otaStatus;
+      } catch (error) {
+        this._expectedOtaReboot = false;
+        try { await this._writeOtaControl({ cmd: 'abort' }); } catch (_) {}
+        throw error;
+      } finally {
+        this._otaInProgress = false;
+        this.setPingSuspended(false);
+      }
+    }
+
+    waitForFirmwareVersion(version, timeoutMs = 60000) {
+      return new Promise((resolve, reject) => {
+        let unsubscribe = () => {};
+        const timer = setTimeout(() => {
+          unsubscribe();
+          this._expectedOtaReboot = false;
+          reject(new Error('Controller did not reconnect with the new firmware'));
+        }, timeoutMs);
+        unsubscribe = this.on('status', status => {
+          if (status?.v !== version) return;
+          clearTimeout(timer);
+          unsubscribe();
+          this._expectedOtaReboot = false;
+          resolve(status);
+        });
+        if (this.state === 'connected') this.send({ cmd: 'status' }).catch(() => {});
+      });
+    }
+
+    _writeOtaControl(payload) {
+      if (this.state !== 'connected' || !this._otaControl) return Promise.reject(new Error('OTA control unavailable'));
+      const body = new TextEncoder().encode(JSON.stringify(payload));
+      return withTimeout(this._otaControl.writeValueWithResponse(body), WRITE_TIMEOUT_MS, 'OTA control write');
+    }
+
+    _waitForOtaStatus(predicate) {
+      if (this._otaStatus && predicate(this._otaStatus)) return Promise.resolve(this._otaStatus);
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          this._otaWaiters.delete(waiter);
+          reject(new Error('OTA acknowledgement timed out'));
+        }, OTA_ACK_TIMEOUT_MS);
+        this._otaWaiters.add(waiter);
+      });
+    }
+
+    _throwForOtaError() {
+      if (this._otaStatus?.state === 'error') throw new Error(this._otaStatus.error || 'Controller rejected firmware update');
+    }
+
+    _rejectOtaWaiters(error) {
+      for (const waiter of this._otaWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+      this._otaWaiters.clear();
+    }
+
     // During an active countdown the 700 ms heartbeat already proves the link;
     // running the ping concurrently just competes for GATT bandwidth.
     setPingSuspended(suspended) {
@@ -299,6 +461,20 @@
       // keep a half-dead status channel alive forever.
       this.lastActivityAt = Date.now();
       this._emit('status', parsed);
+    }
+
+    _onOtaNotify(event) {
+      let parsed;
+      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      this.lastActivityAt = Date.now();
+      this._otaStatus = parsed;
+      this._emit('ota-status', parsed);
+      for (const waiter of [...this._otaWaiters]) {
+        if (!waiter.predicate(parsed)) continue;
+        clearTimeout(waiter.timer);
+        this._otaWaiters.delete(waiter);
+        waiter.resolve(parsed);
+      }
     }
 
     _startPing() {

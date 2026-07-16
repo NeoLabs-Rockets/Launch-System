@@ -261,6 +261,13 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
 .sp-help{font-size:.72em;color:var(--muted);line-height:1.5;margin-bottom:6px}
 .sp-derived{background:rgba(77,159,255,.05);border:1px solid rgba(77,159,255,.18);
   border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:9px}
+.firmware-update-card{border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:18px;background:rgba(7,11,22,.45)}
+.firmware-update-card .sp-dr{padding:7px 0}
+.firmware-update-card .sp-save{margin-top:12px}
+.firmware-update-card.updating{border-color:rgba(77,159,255,.5);box-shadow:inset 0 0 24px rgba(77,159,255,.06)}
+.firmware-update-card.error{border-color:rgba(255,74,61,.45)}
+.firmware-progress{height:7px;border-radius:4px;background:var(--border);overflow:hidden;margin:10px 0 8px}
+.firmware-progress-fill{height:100%;width:0;background:linear-gradient(90deg,var(--blue-d),var(--blue));transition:width .2s ease}
 .sp-dr{display:flex;justify-content:space-between;align-items:center;font-size:.8em;gap:14px}
 .sp-dk{color:var(--muted)}
 .sp-dv{color:var(--ice);font-weight:700;letter-spacing:.04em;text-align:right}
@@ -269,6 +276,7 @@ footer{text-align:center;font-size:.65em;letter-spacing:.15em;color:var(--muted)
   border:none;border-radius:10px;color:#fff;font-family:var(--font);font-size:.75em;
   font-weight:700;letter-spacing:.2em;text-transform:uppercase;cursor:pointer;transition:opacity .2s}
 .sp-save:hover{opacity:.85}
+.sp-save:disabled{opacity:.42;cursor:not-allowed}
 
 .rocket-badge{display:flex;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;
   background:rgba(77,159,255,.05);border:1px solid rgba(77,159,255,.15);
