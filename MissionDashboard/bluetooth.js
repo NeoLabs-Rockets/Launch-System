@@ -267,6 +267,7 @@ function onBleLinkDown(detail) {
   }
   bleStatusData = null;
   lastLaunchEvent = null;
+  try { localStorage.removeItem('neolabs.launch.lastEvent'); } catch (_) {}
   releaseLaunchWakeLock();
   sync.releaseOwner(detail.reason || 'link_down');
   sharedState = { ...sharedState, connected: false, ownerActive: false, ownerName: '', status: null, countdown: null };
@@ -1271,9 +1272,12 @@ function handleSharedState(state) {
   sharedState = state || {};
   sharedStateReceivedAt = Date.now();
   serverClientCount = Number(sharedState.viewers) || serverClientCount;
+  // Establish whether a live BLE owner exists before replaying any durable
+  // launch transition to the camera HUD.
+  publishCameraSharedState();
   if (!bleLink.connected) {
     bleStatusData = sharedState.ownerActive ? (sharedState.status || null) : null;
-    if (sharedState.lastEvent) {
+    if (sharedState.ownerActive && sharedState.lastEvent) {
       const replay = sharedState.lastEvent.type === 'countdown_start' && sharedState.countdown?.active
         ? { ...sharedState.lastEvent, remainingMs: sharedState.countdown.remainingMs }
         : sharedState.lastEvent;
@@ -1282,7 +1286,7 @@ function handleSharedState(state) {
     // A durable lastEvent carries the exact transition (especially ignition
     // versus abort), so do not synthesize a generic camera abort from the
     // resulting inactive countdown snapshot.
-    applySharedCountdownState(sharedState.ownerActive ? sharedState.countdown : null, !sharedState.lastEvent);
+    applySharedCountdownState(sharedState.ownerActive ? sharedState.countdown : null, !sharedState.ownerActive || !sharedState.lastEvent);
     if (sharedState.ownerActive && sharedState.reconnecting && bleLink.state !== 'reconnecting') {
       setLaunchState('BLE owner is relinking to the controller…', 'warn');
     } else if (sharedState.ownerActive && sharedState.connected) {
@@ -1292,7 +1296,6 @@ function handleSharedState(state) {
     // dropped beacon, crashed link) — reattach automatically.
     if (sharedState.youAreOwner && bleLink.state === 'idle') maybeRestoreOwnBle();
   }
-  publishCameraSharedState();
   renderLaunch();
 }
 

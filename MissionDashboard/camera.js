@@ -101,18 +101,30 @@
         try { applyBleState(JSON.parse(event.newValue)); } catch (_) {}
       }
     });
-    try {
-      const saved = JSON.parse(localStorage.getItem('neolabs.launch.lastEvent') || 'null');
-      if (saved && Date.now() - saved.at < 45000) applyLaunchEvent(saved);
-    } catch (_) {}
+    // Restore link authority before any launch transition. Otherwise a stale
+    // ignition event can start T+ while the controller is offline.
     try {
       const savedBle = JSON.parse(localStorage.getItem('neolabs.ble.state') || 'null');
       if (savedBle && Date.now() - savedBle.at < 15000) applyBleState(savedBle);
+    } catch (_) {}
+    try {
+      const saved = JSON.parse(localStorage.getItem('neolabs.launch.lastEvent') || 'null');
+      if (saved && Date.now() - saved.at < 45000) applyLaunchEvent(saved);
     } catch (_) {}
   }
 
   function applyLaunchEvent(data) {
     if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
+    const liveLaunchPhase = cameraBleConnected && !!cameraControllerStatus && (
+      cameraControllerStatus.armed === true
+      || cameraControllerStatus.countdown === true
+      || cameraControllerStatus.trigger === true
+    );
+    // Countdown transitions require live controller evidence. Ignition may
+    // also complete a countdown already accepted by this camera, which avoids
+    // losing liftoff if the final trigger status notification arrives late.
+    if ((data.type === 'countdown_start' || data.type === 'countdown_tick') && !liveLaunchPhase) return;
+    if (data.type === 'ignition' && !liveLaunchPhase && !externalCountdownActive) return;
     const eventId = String(data.eventId || '');
     if (eventId && seenLaunchEventIds.has(eventId)) return;
     if (eventId) {

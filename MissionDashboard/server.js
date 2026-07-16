@@ -94,7 +94,10 @@ function lastEventAfterOwnerLoss(state, reason) {
   if (state.countdown?.active || state.status?.armed || state.lastEvent?.type === 'countdown_start') {
     return ownerLossEvent(reason);
   }
-  return state.lastEvent?.type === 'abort' || state.lastEvent?.type === 'ignition' ? state.lastEvent : null;
+  // Existing camera clients have already received a real ignition transition
+  // and may keep rendering T+ locally. Do not replay it to new/offline clients
+  // after the BLE owner has disappeared.
+  return state.lastEvent?.type === 'abort' ? state.lastEvent : null;
 }
 
 function publicHostState(value) {
@@ -826,6 +829,10 @@ app.post('/api/launch-event', (req, res) => {
   if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'bad payload' });
   const ownershipEvent = payload.type === 'owner_heartbeat' || payload.type === 'ble_state';
   const fromOwner = ownerAlive() && payload.clientId === sharedLaunch.ownerId;
+  const controllerTransition = ['countdown_start', 'countdown_tick', 'ignition'].includes(payload.type);
+  if (controllerTransition && (!ownerAlive() || !fromOwner)) {
+    return res.status(403).json({ error: 'active_ble_owner_required' });
+  }
   if (!ownershipEvent && ownerAlive() && !fromOwner && !sessionFor(req)) {
     return res.status(401).json({ error: 'launch_code_required' });
   }
