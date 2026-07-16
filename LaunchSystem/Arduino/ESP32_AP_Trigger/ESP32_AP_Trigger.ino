@@ -21,16 +21,19 @@
 #define NTC_NOMINAL_RESISTANCE_OHMS 10000.0f
 #define NTC_NOMINAL_TEMPERATURE_K 298.15f
 #define NTC_BETA 3950.0f
-#define BUZZER_FREQUENCY_HZ 2400U
-#define BUZZER_DISARM_MS 250UL
-#define BUZZER_ARM_MS 350UL
-#define BUZZER_TRIGGER_MS 500UL
+#define BUZZER_MIN_FREQUENCY_HZ 1800U
+#define BUZZER_MAX_FREQUENCY_HZ 4200U
+#define BUZZER_FREQUENCY_STEP_HZ 120U
+#define BUZZER_STEP_INTERVAL_MS 25UL
+#define BUZZER_DISARM_MS 700UL
+#define BUZZER_ARM_MS 900UL
+#define BUZZER_TRIGGER_MS 1600UL
 
 static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
-static const char FIRMWARE_VERSION[] = "2.9.1";
+static const char FIRMWARE_VERSION[] = "2.9.2";
 
 NimBLECharacteristic* statusChar = nullptr;
 Adafruit_NeoPixel statusPixel(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -39,7 +42,9 @@ bool continuity = false, continuityRaw = false, continuityOverride = false;
 float temperatureC = NAN;
 unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0, continuityChangedAt = 0;
 unsigned long lastTemperatureSampleAt = 0;
-unsigned long buzzerStopsAt = 0;
+unsigned long buzzerStopsAt = 0, nextBuzzerStepAt = 0;
+uint16_t buzzerFrequencyHz = BUZZER_MIN_FREQUENCY_HZ;
+int16_t buzzerFrequencyStepHz = BUZZER_FREQUENCY_STEP_HZ;
 uint32_t currentStatusPixelColor = UINT32_MAX;
 int attempts = 0, connectedCount = 0;
 String ownerSid, lastError;
@@ -65,8 +70,12 @@ int jsonInt(const String& src, const char* key, int fallback) {
 }
 
 void startBuzzer(unsigned long durationMs) {
-  tone(BUZZER_PIN, BUZZER_FREQUENCY_HZ);
-  buzzerStopsAt = millis() + durationMs;
+  const unsigned long now = millis();
+  buzzerFrequencyHz = BUZZER_MIN_FREQUENCY_HZ;
+  buzzerFrequencyStepHz = BUZZER_FREQUENCY_STEP_HZ;
+  tone(BUZZER_PIN, buzzerFrequencyHz);
+  nextBuzzerStepAt = now + BUZZER_STEP_INTERVAL_MS;
+  buzzerStopsAt = now + durationMs;
 }
 
 float readNtcTemperatureC() {
@@ -99,6 +108,7 @@ void safeStop(const char* reason) {
   digitalWrite(RELAY_PIN, LOW);
   noTone(BUZZER_PIN);
   buzzerStopsAt = 0;
+  nextBuzzerStepAt = 0;
 }
 
 void publishStatus() {
@@ -266,9 +276,21 @@ void loop() {
     safeStop("heartbeat_lost");
     publishStatus();
   }
-  if (buzzerStopsAt && (long)(now - buzzerStopsAt) >= 0) {
-    noTone(BUZZER_PIN);
-    buzzerStopsAt = 0;
+  if (buzzerStopsAt) {
+    if ((long)(now - buzzerStopsAt) >= 0) {
+      noTone(BUZZER_PIN);
+      buzzerStopsAt = 0;
+      nextBuzzerStepAt = 0;
+    } else if ((long)(now - nextBuzzerStepAt) >= 0) {
+      int32_t nextFrequency = (int32_t)buzzerFrequencyHz + buzzerFrequencyStepHz;
+      if (nextFrequency >= BUZZER_MAX_FREQUENCY_HZ || nextFrequency <= BUZZER_MIN_FREQUENCY_HZ) {
+        buzzerFrequencyStepHz = -buzzerFrequencyStepHz;
+        nextFrequency = constrain(nextFrequency, BUZZER_MIN_FREQUENCY_HZ, BUZZER_MAX_FREQUENCY_HZ);
+      }
+      buzzerFrequencyHz = (uint16_t)nextFrequency;
+      tone(BUZZER_PIN, buzzerFrequencyHz);
+      nextBuzzerStepAt = now + BUZZER_STEP_INTERVAL_MS;
+    }
   }
   // NeoPixel status: red = firing/fault, amber = armed/countdown/bypass,
   // blue heartbeat = waiting for BLE, green = connected and ready.
