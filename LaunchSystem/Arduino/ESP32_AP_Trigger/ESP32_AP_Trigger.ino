@@ -487,23 +487,30 @@ void loop() {
     } else if (!temperatureInterlockActive() && lastError == "over_temperature") lastError = "";
     publishStatus();
   }
-  const bool sampledContinuity = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
-  if (sampledContinuity != continuityRaw) {
-    continuityRaw = sampledContinuity;
-    continuityChangedAt = now;
-  } else if (continuity != continuityRaw && now - continuityChangedAt >= CONTINUITY_DEBOUNCE_MS) {
-    continuity = continuityRaw;
-    if (continuity) continuityOverride = false;
-    if (!continuity && !continuityOverride && (armed || countdown || firing)) {
-      safeStop("continuity_lost");
-      startBuzzer(BUZZER_DISARM_MS);
+  // The energized relay changes the continuity circuit, so GPIO34 is not a
+  // valid measurement during the trigger pulse. Preserve the last verified
+  // value until the relay closes, then restart the normal debounce window.
+  if (!firing) {
+    const bool sampledContinuity = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
+    if (sampledContinuity != continuityRaw) {
+      continuityRaw = sampledContinuity;
+      continuityChangedAt = now;
+    } else if (continuity != continuityRaw && now - continuityChangedAt >= CONTINUITY_DEBOUNCE_MS) {
+      continuity = continuityRaw;
+      if (continuity) continuityOverride = false;
+      if (!continuity && !continuityOverride && (armed || countdown)) {
+        safeStop("continuity_lost");
+        startBuzzer(BUZZER_DISARM_MS);
+      }
+      else if (continuity && (lastError == "no_continuity" || lastError == "continuity_lost")) lastError = "";
+      publishStatus();
     }
-    else if (continuity && (lastError == "no_continuity" || lastError == "continuity_lost")) lastError = "";
-    publishStatus();
   }
   if (firing && now - triggerStarted >= TRIGGER_MS) {
     digitalWrite(RELAY_PIN, LOW);
     firing = false;
+    continuityRaw = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
+    continuityChangedAt = now;
     publishStatus();
   }
   if (countdown && now - lastHeartbeat > COUNTDOWN_TIMEOUT_MS) {
