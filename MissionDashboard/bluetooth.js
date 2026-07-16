@@ -347,6 +347,11 @@ async function armLaunch() {
     renderLaunch();
     return;
   }
+  if (temperatureInterlockActive()) {
+    setLaunchState('Arming blocked — controller temperature is 40 °C or higher', 'bad');
+    renderLaunch();
+    return;
+  }
   if (!allLaunchChecks()) {
     setLaunchState('Complete the safety checklist before arming', 'warn');
     return;
@@ -659,6 +664,7 @@ function renderLaunch() {
   const physicalContinuity = status.continuity === true;
   const continuityBypassed = !physicalContinuity && status.continuityOverride === true;
   const hasContinuity = continuityReady(status);
+  const overTemperature = linked && temperatureInterlockActive(status);
   const bluetoothSupported = NeoBleLink.supported();
 
   // Buttons
@@ -681,9 +687,9 @@ function renderLaunch() {
   // action buttons until the automatic restore has relinked.
   const selfOwnerDown = !!sharedState.youAreOwner && !bleLink.connected;
   setDisabled('ble-disconnect', !bleLink.connected && !reconnecting && !connecting);
-  setDisabled('ble-arm', !linked || armed || locked || !checklistReady || reconnecting || selfOwnerDown);
+  setDisabled('ble-arm', !linked || armed || locked || overTemperature || !checklistReady || reconnecting || selfOwnerDown);
   setDisabled('ble-disarm', !linked || !armed || reconnecting || selfOwnerDown);
-  setDisabled('ble-launch', !linked || !armed || locked || countdownLive || reconnecting || selfOwnerDown);
+  setDisabled('ble-launch', !linked || !armed || locked || overTemperature || countdownLive || reconnecting || selfOwnerDown);
   setDisabled('ble-abort', !linked || (!armed && !countdownLive));
 
   // Modal metrics
@@ -692,7 +698,7 @@ function renderLaunch() {
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
   setText('ble-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Bypassed' : physicalContinuity ? 'Connected' : 'Open circuit');
   const temperatureText = linked && Number.isFinite(status.temperatureC) ? `${status.temperatureC.toFixed(1)} °C` : '—';
-  const temperatureDetail = linked && Number.isFinite(status.temperatureC) ? 'Live · 10 kΩ NTC on GPIO35' : linked ? 'NTC input invalid · GPIO35' : 'Waiting for controller';
+  const temperatureDetail = overTemperature ? 'Interlock active · 40 °C limit' : linked && Number.isFinite(status.temperatureC) ? 'Live · 10 kΩ NTC on GPIO35' : linked ? 'NTC input invalid · GPIO35' : 'Waiting for controller';
   setText('ble-temperature', temperatureText);
   setText('ble-temperature-sub', temperatureDetail);
   const linkedName = bleLink.connected || reconnecting
@@ -703,8 +709,8 @@ function renderLaunch() {
   // Modal status badge
   const badge = el('ble-go-badge');
   const label = el('ble-go-label');
-  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
-  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+  if (badge) badge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (label) label.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
 
   // Dashboard summary card
   setText('ds-link', el('ble-state')?.textContent || (linked ? 'Linked' : 'Not connected'));
@@ -718,8 +724,12 @@ function renderLaunch() {
   setText('ds-clients', serverClientCount);
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
-  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (dsLabel) dsLabel.textContent = !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+
+  [el('ds-temperature')?.closest('.temperature-item'), el('ble-temperature')?.closest('.temperature-item')].forEach(card => {
+    if (card) card.classList.toggle('temperature-hot', overTemperature);
+  });
 
   const continuityCards = [el('ds-continuity-item'), el('lc-continuity-check')];
   continuityCards.forEach(card => {
@@ -804,9 +814,11 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnectin
   if (lcStep === 0) note.textContent = linked
     ? `Linked${currentStatus().firmwareVersion ? ` · firmware ${currentStatus().firmwareVersion}` : ''}. Continue to the checklist.`
     : 'Pair the NeoLabs controller to begin.';
-  else if (lcStep === 1) note.textContent = continuityReady()
-    ? 'Continuity verified. Confirm every checklist item to enable arming.'
-    : 'Arming locked: motor/igniter continuity is required.';
+  else if (lcStep === 1) note.textContent = temperatureInterlockActive()
+    ? 'Arming locked: controller temperature must fall below 40 °C.'
+    : continuityReady()
+      ? 'Continuity verified. Confirm every checklist item to enable arming.'
+      : 'Arming locked: motor/igniter continuity is required.';
   else if (lcStep === 2) note.textContent = armed ? 'Armed. Continue to the launch step.' : 'Review launch conditions, then arm.';
   else note.textContent = 'Hold for a clear range and airspace, then start the countdown. Abort is always available.';
 }
@@ -838,11 +850,15 @@ function setLaunchState(text, state) {
 /* ─────────────────────────── Helpers / state ─────────────────────────── */
 function allLaunchChecks() {
   const checks = [...document.querySelectorAll('.ble-check')];
-  return continuityReady() && (checks.length === 0 || checks.every(c => c.checked));
+  return continuityReady() && !temperatureInterlockActive() && (checks.length === 0 || checks.every(c => c.checked));
 }
 
 function continuityReady(status = currentStatus()) {
   return status.continuity === true || status.continuityOverride === true;
+}
+
+function temperatureInterlockActive(status = currentStatus()) {
+  return Number.isFinite(status.temperatureC) && status.temperatureC >= 40;
 }
 
 function clearVisibleCode() {
@@ -968,6 +984,7 @@ function formatControllerError(error) {
     owner_lost: 'Controller disarmed: BLE owner was lost',
     no_continuity: 'Arming blocked: motor/igniter circuit is open',
     continuity_lost: 'Controller safely disarmed: motor/igniter continuity was lost',
+    over_temperature: 'Controller safely aborted: temperature reached 40 °C',
     not_owner: 'Controller is armed by a different session — disarm/abort first, then arm again',
     not_armed: 'Command rejected: controller is not armed',
     trigger_active: 'Command rejected: trigger output is already active',

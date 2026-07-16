@@ -121,9 +121,11 @@ main{max-width:1400px;margin:0 auto;padding:30px 24px 52px;position:relative;z-i
 
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px}
+.grid-5{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-bottom:16px}
 @media(max-width:900px){.grid-4{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:700px){.grid-2{grid-template-columns:1fr}.grid-4{grid-template-columns:1fr 1fr}}
-@media(max-width:480px){.grid-4{grid-template-columns:1fr}}
+@media(max-width:1100px){.grid-5{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.grid-2{grid-template-columns:1fr}.grid-4,.grid-5{grid-template-columns:1fr 1fr}}
+@media(max-width:480px){.grid-4,.grid-5{grid-template-columns:1fr}}
 
 .wx-main{display:flex;align-items:center;gap:16px;margin-bottom:16px}
 .wx-icon{font-size:3.2em;line-height:1}
@@ -146,6 +148,9 @@ main{max-width:1400px;margin:0 auto;padding:30px 24px 52px;position:relative;z-i
 .mini-sub{font-size:.72em;color:var(--muted);margin-top:6px}
 .mini-bar{height:4px;border-radius:2px;background:var(--border);margin-top:10px;overflow:hidden}
 .mini-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--blue-d),var(--blue));transition:width .6s}
+.dryness-fill{background:linear-gradient(90deg,var(--green),var(--amber))}
+.dryness-fill.marginal{background:linear-gradient(90deg,var(--amber),#ff8c00)}
+.dryness-fill.nogo{background:linear-gradient(90deg,#ff8c00,var(--red))}
 
 .daylight-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:.88em}
 .daylight-row .icon{font-size:1.4em;flex-shrink:0}
@@ -502,6 +507,8 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
 .lc-metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
 .lc-panel[data-panel="2"] .lc-metrics{grid-template-columns:repeat(4,1fr)}
 .temperature-item .v{color:#8fd8ff;text-shadow:0 0 18px rgba(77,159,255,.22)}
+.temperature-item.temperature-hot{border-color:rgba(255,74,61,.46)!important;background:rgba(255,74,61,.09)!important;box-shadow:inset 0 0 24px rgba(255,74,61,.06)}
+.temperature-item.temperature-hot .v{color:var(--red);text-shadow:0 0 18px rgba(255,74,61,.28)}
 .lc-metrics .derived-item{min-height:0;padding:12px 14px}
 .lc-countdown-big{font-size:2.8em;font-weight:800;text-align:center;color:#fff;letter-spacing:.04em;
   margin:8px 0 2px;font-variant-numeric:tabular-nums;text-shadow:0 0 26px rgba(255,74,61,.35)}

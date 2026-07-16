@@ -8,6 +8,8 @@ const CACHE_LOCATION_TOLERANCE_KM = 12;
 const WEATHER_CACHE_MAX_AGE_MS = 45 * 60 * 1000;
 const AIRCRAFT_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = [250, 700, 1500];
+const DRYNESS_LOOKBACK_DAYS = 5;
+const DRYNESS_THRESHOLDS = { elevated: 55, major: 75 };
 
 let userLat = null;
 let userLon = null;
@@ -346,7 +348,9 @@ async function fetchWeather() {
   const url = `https://api.open-meteo.com/v1/forecast`
     + `?latitude=${userLat}&longitude=${userLon}`
     + `&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m`
-    + `&hourly=uv_index&daily=sunrise,sunset&forecast_days=1&timezone=auto`;
+    + `&hourly=uv_index,relative_humidity_2m,soil_moisture_0_to_1cm`
+    + `&daily=sunrise,sunset,precipitation_sum,et0_fao_evapotranspiration`
+    + `&past_days=${DRYNESS_LOOKBACK_DAYS}&forecast_days=1&timezone=auto`;
   setFeedState('weather', { status: 'retrying', lastError: null, source: 'network' });
   try {
     const result = await fetchJsonWithRetry(url, { timeoutMs: 5500 });
@@ -931,12 +935,24 @@ function renderWeather() {
     uv = weather.hourly.uv_index[best].toFixed(1);
   }
   document.getElementById('wx-uv').textContent = uv;
+
+  const dryness = evaluateDryness(weather);
+  if (dryness) {
+    animNum('dryness-val', dryness.percent);
+    document.getElementById('dryness-bar').style.width = `${dryness.percent}%`;
+    document.getElementById('dryness-bar').className = `mini-fill dryness-fill ${dryness.status}`;
+    document.getElementById('dryness-sub').textContent = `${dryness.label} · ${dryness.lookbackDays} day weather history`;
+  } else {
+    document.getElementById('dryness-val').textContent = '—';
+    document.getElementById('dryness-bar').style.width = '0%';
+    document.getElementById('dryness-sub').textContent = 'Waiting for recent weather history';
+  }
 }
 
 function renderWeatherEmpty() {
   const ids = ['wx-icon', 'wx-temp', 'wx-desc', 'wx-cloud', 'wx-precip', 'wx-vis', 'wx-uv',
     'wind-speed', 'wind-gust', 'wind-deg', 'wind-from', 'hum-val', 'dewpoint', 'pres-val',
-    'pres-sub', 'sunrise', 'sunset', 'moon-phase', 'daylight-left', 'day-sub'];
+    'pres-sub', 'dryness-val', 'dryness-sub', 'sunrise', 'sunset', 'moon-phase', 'daylight-left', 'day-sub'];
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -944,7 +960,81 @@ function renderWeatherEmpty() {
   });
   document.getElementById('moon-icon').textContent = '🌑';
   document.getElementById('hum-bar').style.width = '0%';
+  document.getElementById('dryness-bar').style.width = '0%';
   document.getElementById('day-bar').style.width = '0%';
+}
+
+function evaluateDryness(snapshot) {
+  const hourly = snapshot?.hourly;
+  const daily = snapshot?.daily;
+  const now = Date.now();
+  if (!hourly?.time?.length || !daily?.time?.length) return null;
+
+  const recentHourlyIndexes = hourly.time
+    .map((time, index) => ({ index, time: new Date(time).getTime() }))
+    .filter(point => Number.isFinite(point.time) && point.time <= now)
+    .map(point => point.index);
+  const recentDailyIndexes = daily.time
+    .map((time, index) => ({ index, time: new Date(`${time}T23:59:59`).getTime() }))
+    .filter(point => Number.isFinite(point.time) && point.time <= now)
+    .slice(-DRYNESS_LOOKBACK_DAYS)
+    .map(point => point.index);
+
+  const soilSamples = recentHourlyIndexes
+    .map(index => hourly.soil_moisture_0_to_1cm?.[index])
+    .filter(value => value != null)
+    .map(Number)
+    .filter(Number.isFinite);
+  const humiditySamples = recentHourlyIndexes
+    .slice(-72)
+    .map(index => hourly.relative_humidity_2m?.[index])
+    .filter(value => value != null)
+    .map(Number)
+    .filter(Number.isFinite);
+  const precipitation = sumFinite(recentDailyIndexes.map(index => daily.precipitation_sum?.[index]));
+  const evapotranspiration = sumFinite(recentDailyIndexes.map(index => daily.et0_fao_evapotranspiration?.[index]));
+
+  const components = [];
+  if (soilSamples.length) {
+    // Approximate plant-available surface-water range: 0.08 m³/m³ (very dry)
+    // to 0.45 m³/m³ (saturated). This keeps the result soil-model agnostic.
+    const soilMoisture = mean(soilSamples.slice(-24));
+    components.push({ value: clamp((0.45 - soilMoisture) / 0.37 * 100, 0, 100), weight: 0.55 });
+  }
+  if (humiditySamples.length) {
+    components.push({ value: clamp(100 - mean(humiditySamples), 0, 100), weight: 0.25 });
+  }
+  if (precipitation != null && evapotranspiration != null) {
+    const waterDeficitMm = evapotranspiration - precipitation;
+    components.push({ value: clamp(50 + waterDeficitMm / 15 * 50, 0, 100), weight: 0.2 });
+  }
+  if (!components.length) return null;
+
+  const totalWeight = sumFinite(components.map(component => component.weight));
+  const percent = Math.round(components.reduce((sum, component) =>
+    sum + component.value * component.weight, 0) / totalWeight);
+  const status = percent >= DRYNESS_THRESHOLDS.major
+    ? 'nogo'
+    : percent >= DRYNESS_THRESHOLDS.elevated ? 'marginal' : 'go';
+  return {
+    percent,
+    status,
+    label: status === 'nogo' ? 'Major fire risk' : status === 'marginal' ? 'Elevated fire risk' : 'Lower modeled fire risk',
+    lookbackDays: recentDailyIndexes.length || Math.max(1, Math.ceil(recentHourlyIndexes.length / 24))
+  };
+}
+
+function mean(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function sumFinite(values) {
+  const finite = values.filter(value => value != null).map(Number).filter(Number.isFinite);
+  return finite.length ? finite.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function renderWind() {
@@ -1118,6 +1208,13 @@ function renderStatus() {
       n: 'Weather Window',
       v: wx.value,
       s: worseStatus(wx.status, feedPenalty)
+    });
+    const dryness = evaluateDryness(weather);
+    factors.push({
+      id: 'surface-dryness',
+      n: 'Dry-land Fire Risk',
+      v: dryness ? `${dryness.percent}% · ${dryness.label}` : 'Recent weather history unavailable',
+      s: worseStatus(dryness?.status || 'marginal', feedPenalty)
     });
     factors.push({
       id: 'daylight-window',

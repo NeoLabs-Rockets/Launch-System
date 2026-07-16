@@ -21,6 +21,7 @@
 #define NTC_NOMINAL_RESISTANCE_OHMS 10000.0f
 #define NTC_NOMINAL_TEMPERATURE_K 298.15f
 #define NTC_BETA 3950.0f
+#define MAX_SAFE_TEMPERATURE_C 40.0f
 #define BUZZER_MIN_FREQUENCY_HZ 1800U
 #define BUZZER_MAX_FREQUENCY_HZ 4200U
 #define BUZZER_FREQUENCY_STEP_HZ 120U
@@ -33,7 +34,7 @@ static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
-static const char FIRMWARE_VERSION[] = "2.9.2";
+static const char FIRMWARE_VERSION[] = "3.0.0";
 
 NimBLECharacteristic* statusChar = nullptr;
 Adafruit_NeoPixel statusPixel(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -88,6 +89,10 @@ float readNtcTemperatureC() {
     + logf(resistance / NTC_NOMINAL_RESISTANCE_OHMS) / NTC_BETA;
   const float sample = 1.0f / inverseKelvin - 273.15f;
   return sample < -55.0f || sample > 125.0f ? NAN : sample;
+}
+
+bool temperatureInterlockActive() {
+  return !isnan(temperatureC) && temperatureC >= MAX_SAFE_TEMPERATURE_C;
 }
 
 void setStatusPixel(uint8_t red, uint8_t green, uint8_t blue) {
@@ -177,6 +182,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
 
     if (cmd == "arm") {
       if (ownerSid.length() && ownerSid != sid) { lastError = "not_owner"; publishStatus(); return; }
+      if (temperatureInterlockActive()) { lastError = "over_temperature"; publishStatus(); return; }
       if (!continuity && !continuityOverride) { lastError = "no_continuity"; publishStatus(); return; }
       attempts = 0;
       ownerSid = sid;
@@ -189,13 +195,15 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
 
     if (!ownerSid.length() || sid != ownerSid) { lastError = "not_owner"; publishStatus(); return; }
     if (cmd == "countdown_start") {
-      if (!continuity && !continuityOverride) safeStop("continuity_lost");
+      if (temperatureInterlockActive()) safeStop("over_temperature");
+      else if (!continuity && !continuityOverride) safeStop("continuity_lost");
       else if (!armed || firing) lastError = armed ? "trigger_active" : "not_armed";
       else { countdown = true; lastHeartbeat = millis(); }
     } else if (cmd == "heartbeat") {
       if (countdown) lastHeartbeat = millis();
     } else if (cmd == "trigger") {
       if (!armed) lastError = "not_armed";
+      else if (temperatureInterlockActive()) safeStop("over_temperature");
       else if (!continuity && !continuityOverride) safeStop("continuity_lost");
       else if (!countdown || millis() - lastHeartbeat > COUNTDOWN_TIMEOUT_MS) safeStop("heartbeat_lost");
       else {
@@ -254,6 +262,10 @@ void loop() {
   if (now - lastTemperatureSampleAt >= TEMPERATURE_SAMPLE_INTERVAL_MS) {
     lastTemperatureSampleAt = now;
     temperatureC = readNtcTemperatureC();
+    if (temperatureInterlockActive() && (armed || countdown || firing)) {
+      safeStop("over_temperature");
+      startBuzzer(BUZZER_TRIGGER_MS);
+    } else if (!temperatureInterlockActive() && lastError == "over_temperature") lastError = "";
     publishStatus();
   }
   const bool sampledContinuity = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
@@ -263,7 +275,10 @@ void loop() {
   } else if (continuity != continuityRaw && now - continuityChangedAt >= CONTINUITY_DEBOUNCE_MS) {
     continuity = continuityRaw;
     if (continuity) continuityOverride = false;
-    if (!continuity && !continuityOverride && (armed || countdown)) safeStop("continuity_lost");
+    if (!continuity && !continuityOverride && (armed || countdown || firing)) {
+      safeStop("continuity_lost");
+      startBuzzer(BUZZER_DISARM_MS);
+    }
     else if (continuity && (lastError == "no_continuity" || lastError == "continuity_lost")) lastError = "";
     publishStatus();
   }
@@ -296,6 +311,7 @@ void loop() {
   // blue heartbeat = waiting for BLE, green = connected and ready.
   uint8_t red = 0, green = 0, blue = 0;
   if (firing) red = 140;
+  else if (temperatureInterlockActive()) { red = 110; blue = 12; }
   else if (countdown && (now / 100) % 2) { red = 120; green = 28; }
   else if (armed) { red = 90; green = 18; }
   else if (continuityOverride) { red = 55; green = 28; }
