@@ -15,7 +15,7 @@
     'state'  { state, reason?, attempt?, nextRetryMs?, error? }
     'status' parsed controller status JSON (raw {a,f,c,l,q,b,t,left,n,u,e,v};
                                              q = continuity, b = temporary bypass,
-                                             t = DS18B20 temperature in °C or null)
+                                             t = 10 kΩ B3950 NTC temperature in °C or null)
     'health' { staleMs } while connected (controller notifies every ~1 s)
 */
 (function () {

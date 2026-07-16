@@ -1,38 +1,46 @@
 /* NeoLabs Rockets launch controller — BLE only. */
 #include <NimBLEDevice.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#include <Adafruit_NeoPixel.h>
 
 #define RELAY_PIN 23
 #define CONTINUITY_PIN 34
 #define CONTINUITY_ACTIVE_LEVEL LOW
-#define RED_LED_PIN 26
+#define STATUS_LED_PIN 26
 #define ARM_PIN -1
 #define BUZZER_PIN 33
-#define TEMPERATURE_PIN 18
+#define TEMPERATURE_PIN 35
 #define LAUNCH_CODE "123456"  // must match MissionDashboard LAUNCH_CODE
 #define MAX_ATTEMPTS 10
 #define TRIGGER_MS 2000UL
 #define COUNTDOWN_TIMEOUT_MS 3000UL
 #define CONTINUITY_DEBOUNCE_MS 60UL
 #define TEMPERATURE_SAMPLE_INTERVAL_MS 1000UL
-#define TEMPERATURE_CONVERSION_MS 750UL
+#define NTC_SAMPLE_COUNT 16
+#define NTC_SUPPLY_MV 3300.0f
+#define NTC_FIXED_RESISTOR_OHMS 10000.0f
+#define NTC_NOMINAL_RESISTANCE_OHMS 10000.0f
+#define NTC_NOMINAL_TEMPERATURE_K 298.15f
+#define NTC_BETA 3950.0f
+#define BUZZER_FREQUENCY_HZ 2400U
+#define BUZZER_DISARM_MS 250UL
+#define BUZZER_ARM_MS 350UL
+#define BUZZER_TRIGGER_MS 500UL
 
 static NimBLEUUID SERVICE_UUID("8f3a0001-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID COMMAND_UUID("8f3a0002-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static NimBLEUUID STATUS_UUID ("8f3a0003-7b2f-4f8a-9d0e-0c5b6f0a1000");
 static const char BLE_NAME[] = "NeoLabs Launch Controller";
-static const char FIRMWARE_VERSION[] = "2.8.1";
+static const char FIRMWARE_VERSION[] = "2.9.1";
 
 NimBLECharacteristic* statusChar = nullptr;
-OneWire temperatureBus(TEMPERATURE_PIN);
-DallasTemperature temperatureSensors(&temperatureBus);
+Adafruit_NeoPixel statusPixel(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 bool armed = false, firing = false, countdown = false, locked = false;
 bool continuity = false, continuityRaw = false, continuityOverride = false;
-bool temperatureConversionPending = false;
 float temperatureC = NAN;
 unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0, continuityChangedAt = 0;
-unsigned long temperatureConversionStartedAt = 0, lastTemperatureRequestAt = 0;
+unsigned long lastTemperatureSampleAt = 0;
+unsigned long buzzerStopsAt = 0;
+uint32_t currentStatusPixelColor = UINT32_MAX;
 int attempts = 0, connectedCount = 0;
 String ownerSid, lastError;
 
@@ -56,10 +64,29 @@ int jsonInt(const String& src, const char* key, int fallback) {
   return end == start ? fallback : src.substring(start, end).toInt();
 }
 
-void buzzerPulse(unsigned long ms = 100) {
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(ms);
-  digitalWrite(BUZZER_PIN, LOW);
+void startBuzzer(unsigned long durationMs) {
+  tone(BUZZER_PIN, BUZZER_FREQUENCY_HZ);
+  buzzerStopsAt = millis() + durationMs;
+}
+
+float readNtcTemperatureC() {
+  uint32_t millivoltSum = 0;
+  for (uint8_t i = 0; i < NTC_SAMPLE_COUNT; i++) millivoltSum += analogReadMilliVolts(TEMPERATURE_PIN);
+  const float millivolts = millivoltSum / (float)NTC_SAMPLE_COUNT;
+  if (millivolts <= 5.0f || millivolts >= NTC_SUPPLY_MV - 5.0f) return NAN;
+  const float resistance = NTC_FIXED_RESISTOR_OHMS * millivolts / (NTC_SUPPLY_MV - millivolts);
+  const float inverseKelvin = (1.0f / NTC_NOMINAL_TEMPERATURE_K)
+    + logf(resistance / NTC_NOMINAL_RESISTANCE_OHMS) / NTC_BETA;
+  const float sample = 1.0f / inverseKelvin - 273.15f;
+  return sample < -55.0f || sample > 125.0f ? NAN : sample;
+}
+
+void setStatusPixel(uint8_t red, uint8_t green, uint8_t blue) {
+  const uint32_t color = statusPixel.Color(red, green, blue);
+  if (color == currentStatusPixelColor) return;
+  currentStatusPixelColor = color;
+  statusPixel.setPixelColor(0, color);
+  statusPixel.show();
 }
 
 void safeStop(const char* reason) {
@@ -70,7 +97,8 @@ void safeStop(const char* reason) {
   ownerSid = "";
   lastError = reason;
   digitalWrite(RELAY_PIN, LOW);
-  digitalWrite(BUZZER_PIN, LOW);
+  noTone(BUZZER_PIN);
+  buzzerStopsAt = 0;
 }
 
 void publishStatus() {
@@ -112,7 +140,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       publishStatus();
       return;
     }
-    if (cmd == "abort" || cmd == "disarm") { safeStop(""); buzzerPulse(80); publishStatus(); return; }
+    if (cmd == "abort" || cmd == "disarm") { safeStop(""); startBuzzer(BUZZER_DISARM_MS); publishStatus(); return; }
     if (cmd == "auth") {
       lastError = jsonString(body, "code") == LAUNCH_CODE ? "auth_ok" : "auth_failed";
       publishStatus();
@@ -144,7 +172,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
       ownerSid = sid;
       armed = true;
       countdown = false;
-      buzzerPulse(100);
+      startBuzzer(BUZZER_ARM_MS);
       publishStatus();
       return;
     }
@@ -168,7 +196,7 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
         countdown = false;
         continuityOverride = false;
         ownerSid = "";
-        buzzerPulse(120);
+        startBuzzer(BUZZER_TRIGGER_MS);
       }
     } else lastError = "unknown_cmd";
     publishStatus();
@@ -182,16 +210,15 @@ void setup() {
   pinMode(CONTINUITY_PIN, INPUT); // External continuity network provides the logic level.
   continuityRaw = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
   continuity = continuityRaw;
-  pinMode(RED_LED_PIN, OUTPUT);
-  digitalWrite(RED_LED_PIN, LOW);
+  statusPixel.begin();
+  statusPixel.clear();
+  statusPixel.show();
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
-  temperatureSensors.begin();
-  temperatureSensors.setWaitForConversion(false);
-  temperatureSensors.requestTemperatures();
-  temperatureConversionPending = true;
-  temperatureConversionStartedAt = millis();
-  lastTemperatureRequestAt = temperatureConversionStartedAt;
+  analogReadResolution(12);
+  analogSetPinAttenuation(TEMPERATURE_PIN, ADC_11db);
+  temperatureC = readNtcTemperatureC();
+  lastTemperatureSampleAt = millis();
 
   NimBLEDevice::init(BLE_NAME);
   NimBLEDevice::setMTU(185);
@@ -214,16 +241,10 @@ void setup() {
 
 void loop() {
   const unsigned long now = millis();
-  if (temperatureConversionPending && now - temperatureConversionStartedAt >= TEMPERATURE_CONVERSION_MS) {
-    const float sample = temperatureSensors.getTempCByIndex(0);
-    temperatureC = sample == DEVICE_DISCONNECTED_C || sample < -55.0f || sample > 125.0f ? NAN : sample;
-    temperatureConversionPending = false;
+  if (now - lastTemperatureSampleAt >= TEMPERATURE_SAMPLE_INTERVAL_MS) {
+    lastTemperatureSampleAt = now;
+    temperatureC = readNtcTemperatureC();
     publishStatus();
-  } else if (!temperatureConversionPending && now - lastTemperatureRequestAt >= TEMPERATURE_SAMPLE_INTERVAL_MS) {
-    temperatureSensors.requestTemperatures();
-    temperatureConversionPending = true;
-    temperatureConversionStartedAt = now;
-    lastTemperatureRequestAt = now;
   }
   const bool sampledContinuity = digitalRead(CONTINUITY_PIN) == CONTINUITY_ACTIVE_LEVEL;
   if (sampledContinuity != continuityRaw) {
@@ -245,17 +266,24 @@ void loop() {
     safeStop("heartbeat_lost");
     publishStatus();
   }
-  // Red LED: solid = relay firing, 5 Hz = countdown, solid = armed,
-  // double flash = no continuity, short heartbeat = no BLE client.
-  bool ledOn = false;
-  if (firing) ledOn = true;
-  else if (countdown) ledOn = (now / 100) % 2;
-  else if (armed) ledOn = true;
+  if (buzzerStopsAt && (long)(now - buzzerStopsAt) >= 0) {
+    noTone(BUZZER_PIN);
+    buzzerStopsAt = 0;
+  }
+  // NeoPixel status: red = firing/fault, amber = armed/countdown/bypass,
+  // blue heartbeat = waiting for BLE, green = connected and ready.
+  uint8_t red = 0, green = 0, blue = 0;
+  if (firing) red = 140;
+  else if (countdown && (now / 100) % 2) { red = 120; green = 28; }
+  else if (armed) { red = 90; green = 18; }
+  else if (continuityOverride) { red = 55; green = 28; }
   else if (!continuity) {
     const unsigned long phase = now % 1200;
-    ledOn = phase < 90 || (phase >= 180 && phase < 270);
-  } else if (connectedCount == 0) ledOn = now % 2000 < 80;
-  digitalWrite(RED_LED_PIN, ledOn ? HIGH : LOW);
+    if (phase < 90 || (phase >= 180 && phase < 270)) red = 100;
+  } else if (connectedCount == 0) {
+    if (now % 2000 < 80) blue = 80;
+  } else green = 32;
+  setStatusPixel(red, green, blue);
   if (now - lastNotify >= 1000) publishStatus();
   delay(5);
 }

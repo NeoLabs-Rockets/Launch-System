@@ -3,3 +3,4 @@
 .DS_Store
 /.pio
 /LaunchSystem/Arduino/Continuity_LED_Test
+/LaunchSystem/Arduino/ESP32_AP_Trigger/.pio

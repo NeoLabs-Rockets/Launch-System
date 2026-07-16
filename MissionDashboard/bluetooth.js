@@ -692,7 +692,7 @@ function renderLaunch() {
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
   setText('ble-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Bypassed' : physicalContinuity ? 'Connected' : 'Open circuit');
   const temperatureText = linked && Number.isFinite(status.temperatureC) ? `${status.temperatureC.toFixed(1)} °C` : '—';
-  const temperatureDetail = linked && Number.isFinite(status.temperatureC) ? 'Live · DS18B20 on GPIO18' : linked ? 'Sensor offline · GPIO18' : 'Waiting for controller';
+  const temperatureDetail = linked && Number.isFinite(status.temperatureC) ? 'Live · 10 kΩ NTC on GPIO35' : linked ? 'NTC input invalid · GPIO35' : 'Waiting for controller';
   setText('ble-temperature', temperatureText);
   setText('ble-temperature-sub', temperatureDetail);
   const linkedName = bleLink.connected || reconnecting
