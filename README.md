@@ -40,7 +40,10 @@ A single-page web app that runs on a laptop at the launch site and connects to a
 
 BLE launch controller — see [`/LaunchSystem`](LaunchSystem/).
 
-<img width="606" height="453" alt="image" src="https://github.com/user-attachments/assets/0b5191ed-5da1-4f4f-921d-e79cdb443e06" />
+<img width="1110" height="647" alt="image" src="https://github.com/user-attachments/assets/a219eb75-a8fe-44fa-bbb5-2142d9208d50" />
+
+<img width="1190" height="485" alt="image" src="https://github.com/user-attachments/assets/dde6c9c8-00ce-4adf-b244-e6070d29d0a6" />
+
 
 See the [LaunchSystem README](LaunchSystem/ReadMe.md) for wiring, pin assignments, parts list, and REST API.
 
