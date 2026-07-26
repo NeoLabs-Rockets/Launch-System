@@ -6,6 +6,8 @@
 
 **Rocket systems by NeoLabs — ESP32 launch controller + Node.js mission dashboard.**
 
+[![Join the NeoLabs Discord](https://img.shields.io/badge/Join%20NeoLabs-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/f59rg2RwUT)
+
 ---
 
 [🚀 Mission Dashboard](#mission-dashboard) · [🛰️ Launch System](#launch-system)
