@@ -88,7 +88,7 @@
       <div class="launch-summary-grid">
         <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
         <div class="derived-item continuity-unknown" id="ds-continuity-item"><div class="k">Continuity</div><div class="v" id="ds-continuity">Unknown</div><div class="s">Required to arm · GPIO34</div><button class="continuity-override" id="ds-continuity-override" type="button" hidden>Ignore continuity</button></div>
-        <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div></div>
+        <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ds-temperature-override" type="button" hidden>Ignore limit</button></div>
         <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
         <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
         <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards connected to server</div></div>
@@ -542,7 +542,7 @@
         <div class="lc-metrics">
           <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div></div>
           <div class="derived-item"><div class="k">Continuity</div><div class="v" id="ble-continuity">Unknown</div></div>
-          <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ble-temperature">—</div><div class="s" id="ble-temperature-sub">Waiting for controller</div></div>
+          <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ble-temperature">—</div><div class="s" id="ble-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ble-temperature-override" type="button" hidden>Ignore limit</button></div>
           <div class="derived-item"><div class="k">Control path</div><div class="v" id="ble-control-mode">—</div></div>
         </div>
       </section>
