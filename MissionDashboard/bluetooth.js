@@ -118,6 +118,7 @@ function bindBleUi() {
   on('ds-continuity-override', 'click', toggleContinuityOverride);
   on('ble-temperature-override', 'click', toggleTemperatureOverride);
   on('ds-temperature-override', 'click', toggleTemperatureOverride);
+  on('lc-temperature-override', 'click', toggleTemperatureOverride);
   on('firmware-update', 'click', runFirmwareUpdate);
   document.querySelectorAll('.ble-check,#ble-code,#ble-count-seconds').forEach(el => {
     el.addEventListener('input', () => { renderLaunch(); });
@@ -896,13 +897,30 @@ function renderLaunch() {
   });
   
   const physicalTemperatureHigh = linked && Number.isFinite(status.temperatureC) && status.temperatureC >= 40;
-  [el('ble-temperature-override'), el('ds-temperature-override')].forEach(overrideButton => {
+  [el('ble-temperature-override'), el('ds-temperature-override'), el('lc-temperature-override')].forEach(overrideButton => {
     if (!overrideButton) return;
     overrideButton.hidden = !linked || !physicalTemperatureHigh;
     overrideButton.disabled = reconnecting || selfOwnerDown || !!status.trigger || countdownLive;
     overrideButton.textContent = temperatureBypassed ? 'Restore limit check' : 'Ignore limit';
     overrideButton.classList.toggle('active', temperatureBypassed);
   });
+
+  const temperatureCards = [el('lc-temperature-check')];
+  temperatureCards.forEach(card => {
+    if (!card) return;
+    card.classList.toggle('continuity-ok', linked && !physicalTemperatureHigh);
+    card.classList.toggle('continuity-bypassed', linked && temperatureBypassed);
+    card.classList.toggle('continuity-bad', linked && physicalTemperatureHigh && !temperatureBypassed);
+    card.classList.toggle('continuity-unknown', !linked);
+  });
+  setText('lc-temperature-title', !linked ? 'Waiting for controller' : temperatureBypassed ? 'Temperature limit ignored' : physicalTemperatureHigh ? 'Controller too hot' : 'Temperature normal');
+  setText('lc-temperature-detail', !linked
+    ? 'Temperature is verified by GPIO35 after BLE connects.'
+    : temperatureBypassed
+    ? 'Temporary override is active for this launch session.'
+    : physicalTemperatureHigh
+    ? 'Limit is 40 °C. Let the controller cool down.'
+    : 'GPIO35 reports safe operating temperature.');
 
   // camera.js owns its label so direct/shared state cannot be overwritten by a
   // generic launch-console render. Keep a fallback for pages without that hook.

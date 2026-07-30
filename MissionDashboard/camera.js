@@ -37,6 +37,8 @@
   let countdownAudioDest = null;
   let lastCountdownSpoken = null;
   let showTelemetry = true;
+  let countdownFadeStart = 0;
+  let countdownOpacity = 0;
   const seenLaunchEventIds = new Set();
 
   window.CameraApp = { onShow, onHide };
@@ -69,6 +71,7 @@
     document.getElementById('cam-record').addEventListener('click', startRecording);
     document.getElementById('cam-stop').addEventListener('click', stopRecording);
     document.getElementById('cam-download-green').addEventListener('click', downloadPendingGreenRecording);
+    document.getElementById('cam-download-stats').addEventListener('click', downloadStatsImage);
     // Retry path with no extra button: tap the stage to re-request the camera.
     const stage = document.querySelector('#view-camera .camera-stage');
     if (stage) stage.addEventListener('click', () => { if (!sourceStream) openCamera(); });
@@ -115,16 +118,6 @@
 
   function applyLaunchEvent(data) {
     if (!data || !['ble-dashboard', 'launch-dashboard'].includes(data.source)) return;
-    const liveLaunchPhase = cameraBleConnected && !!cameraControllerStatus && (
-      cameraControllerStatus.armed === true
-      || cameraControllerStatus.countdown === true
-      || cameraControllerStatus.trigger === true
-    );
-    // Countdown transitions require live controller evidence. Ignition may
-    // also complete a countdown already accepted by this camera, which avoids
-    // losing liftoff if the final trigger status notification arrives late.
-    if ((data.type === 'countdown_start' || data.type === 'countdown_tick') && !liveLaunchPhase) return;
-    if (data.type === 'ignition' && !liveLaunchPhase && !externalCountdownActive) return;
     const eventId = String(data.eventId || '');
     if (eventId && seenLaunchEventIds.has(eventId)) return;
     if (eventId) {
@@ -140,6 +133,7 @@
         ? Date.now() + Math.max(0, remainingMs)
         : (data.endsAt || (Date.now() + Math.max(0, data.left || data.seconds || 0) * 1000));
       externalCountdownEndsAt = externalCountdownBaseEndsAt + syncOffsetMs;
+      if (!externalCountdownActive) countdownFadeStart = Date.now();
       externalCountdownActive = true;
       updateExternalCountdownLabel();
     } else if (data.type === 'countdown_tick') {
@@ -154,6 +148,7 @@
     } else if (data.type === 'ignition') {
       ignitionAt = Date.now();
       externalCountdownEndsAt = ignitionAt;
+      if (!externalCountdownActive) countdownFadeStart = Date.now();
       externalCountdownActive = true; // keep drawing T+ until recording stops
       setText('cam-count-state', 'T+0:00 — Liftoff');
     } else if (data.type === 'abort') {
@@ -161,12 +156,14 @@
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
       lastCountdownSpoken = null;
+      countdownFadeStart = 0;
       setText('cam-count-state', 'Aborted');
     } else if (data.type === 'sync_lost') {
       externalCountdownActive = false;
       externalCountdownTotalMs = 0;
       ignitionAt = 0;
       lastCountdownSpoken = null;
+      countdownFadeStart = 0;
       setText('cam-count-state', 'Sync lost — outcome pending');
     }
   }
@@ -358,8 +355,22 @@
     }
 
     // Center countdown with progress ring
-    if (countdownMs != null) {
-      drawCountdown(ctx, w, h, countdownMs, u);
+    if (externalCountdownActive) {
+      if (countdownFadeStart) {
+        countdownOpacity = Math.min(1, (Date.now() - countdownFadeStart) / 400);
+      } else {
+        countdownOpacity = 1;
+      }
+    } else {
+      if (countdownOpacity > 0) {
+        countdownOpacity = Math.max(0, countdownOpacity - (16 / 400));
+      }
+    }
+
+    if (countdownOpacity > 0) {
+      ctx.globalAlpha = countdownOpacity;
+      drawCountdown(ctx, w, h, countdownMs || 0, u);
+      ctx.globalAlpha = 1;
     }
 
     // Bottom telemetry strip
@@ -566,6 +577,8 @@
     externalCountdownActive = false;
     externalCountdownTotalMs = 0;
     ignitionAt = 0;
+    countdownFadeStart = 0;
+    countdownOpacity = 0;
     setText('cam-count-state', 'Idle');
     document.getElementById('cam-record').disabled = false;
     document.getElementById('cam-stop').disabled = true;
@@ -599,10 +612,15 @@
     const greenButton = document.getElementById('cam-download-green');
     greenButton.hidden = false;
     greenButton.disabled = false;
+    const statsButton = document.getElementById('cam-download-stats');
+    if (statsButton) {
+      statsButton.hidden = false;
+      statsButton.disabled = false;
+    }
     setText('cam-download', `${Math.round(blob.size / 1024 / 1024 * 10) / 10} MB`);
     setStatus('Recording saved', cached
-      ? 'Main download started. Use the Green-Screen button for the overlay copy.'
-      : 'Main download started locally. Use the Green-Screen button for the overlay copy.', cached ? 'ok' : 'warn');
+      ? 'Main download started. Use the buttons below for the overlay copy or flight stats photo.'
+      : 'Main download started locally. Use the buttons below for the overlay copy or flight stats photo.', cached ? 'ok' : 'warn');
   }
 
   async function downloadPendingGreenRecording() {
@@ -628,6 +646,11 @@
     if (button) {
       button.hidden = true;
       button.disabled = false;
+    }
+    const statsButton = document.getElementById('cam-download-stats');
+    if (statsButton) {
+      statsButton.hidden = true;
+      statsButton.disabled = false;
     }
   }
 
@@ -838,5 +861,132 @@
     countdownAudioDest = null;
     document.getElementById('cam-record').disabled = true;
     document.getElementById('cam-stop').disabled = true;
+  }
+
+  function downloadStatsImage() {
+    const canvas = document.getElementById('cam-stats-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    renderStatsImage(ctx, canvas.width, canvas.height);
+    
+    canvas.toBlob(blob => {
+      if (!blob) return;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadBlob(blob, `neolabs-flight-stats-${stamp}.png`);
+    }, 'image/png');
+  }
+
+  function renderStatsImage(ctx, w, h) {
+    ctx.fillStyle = '#04060e';
+    ctx.fillRect(0, 0, w, h);
+    
+    const grad = ctx.createRadialGradient(w * 0.2, h * 0.3, 0, w * 0.2, h * 0.3, w * 0.7);
+    grad.addColorStop(0, 'rgba(45,111,224, 0.25)');
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    const grad2 = ctx.createRadialGradient(w * 0.8, h * 0.8, 0, w * 0.8, h * 0.8, w * 0.7);
+    grad2.addColorStop(0, 'rgba(54,240,160, 0.1)');
+    grad2.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad2;
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    ctx.fillStyle = '#dbe7ff';
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '8px';
+    ctx.font = '800 36px system-ui, Segoe UI, Arial';
+    ctx.fillText('NEOLABS ROCKETS', w / 2, 140);
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+
+    const title = document.getElementById('cam-title').value || 'NeoLabs Launch';
+    const site = document.getElementById('cam-site').value || 'Launch Site';
+    const mission = document.getElementById('cam-mission').value || 'Flight Test';
+    
+    const titleGrad = ctx.createLinearGradient(0, 200, 0, 300);
+    titleGrad.addColorStop(0, '#ffffff');
+    titleGrad.addColorStop(1, '#a9c6f5');
+    ctx.fillStyle = titleGrad;
+    
+    ctx.font = '900 110px system-ui, Segoe UI, Arial';
+    ctx.fillText(title.toUpperCase(), w / 2, 260);
+    
+    ctx.fillStyle = '#9fd4ff';
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '4px';
+    ctx.font = '600 32px system-ui, Segoe UI, Arial';
+    ctx.fillText(`${mission.toUpperCase()} · ${site.toUpperCase()}`, w / 2, 360);
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+
+    ctx.strokeStyle = 'rgba(159,212,255,0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(w / 2 - 200, 420);
+    ctx.lineTo(w / 2 + 200, 420);
+    ctx.stroke();
+
+    const stats = [];
+    const wx = (typeof weather !== 'undefined' && weather) ? weather.current : null;
+    if (wx) {
+      stats.push({ label: 'WEATHER', value: `${Math.round(wx.temperature_2m)} °C` });
+      stats.push({ label: 'WIND SPEED', value: `${Math.round(wx.wind_speed_10m)} km/h` });
+      stats.push({ label: 'CLOUD COVER', value: `${Math.round(wx.cloud_cover)} %` });
+    }
+
+    const rm = (typeof rocketModel !== 'undefined' && rocketModel) ? rocketModel : null;
+    if (rm) {
+      stats.push({ label: 'TARGET APOGEE', value: `${Math.round(rm.apogeeM)} m` });
+    }
+
+    if (cameraControllerStatus && Number.isFinite(cameraControllerStatus.temperatureC)) {
+      stats.push({ label: 'SYS TEMPERATURE', value: `${cameraControllerStatus.temperatureC.toFixed(1)} °C` });
+    }
+
+    const dateStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    stats.push({ label: 'DATE', value: dateStr });
+    
+    const cols = 3;
+    const gapX = 420;
+    const gapY = 200;
+    const startY = 580;
+
+    stats.forEach((stat, index) => {
+      const row = Math.floor(index / cols);
+      const itemsInRow = Math.min(cols, stats.length - row * cols);
+      const startX = w / 2 - ((itemsInRow - 1) * gapX) / 2;
+      const col = index % cols;
+      const x = startX + col * gapX;
+      const y = startY + row * gapY;
+      
+      ctx.strokeStyle = 'rgba(77,159,255,0.3)';
+      ctx.lineWidth = 1.5;
+      ctx.fillStyle = 'rgba(16,24,46,0.5)';
+      ctx.beginPath();
+      if (ctx.roundRect) {
+        ctx.roundRect(x - 180, y - 75, 360, 150, 20);
+      } else {
+        ctx.rect(x - 180, y - 75, 360, 150);
+      }
+      ctx.fill();
+      ctx.stroke();
+      
+      ctx.fillStyle = '#64759c';
+      if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '3px';
+      ctx.font = '700 18px system-ui, Segoe UI, Arial';
+      ctx.fillText(stat.label, x, y - 24);
+      if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+      
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '800 52px system-ui, Segoe UI, Arial';
+      ctx.fillText(stat.value, x, y + 28);
+    });
+    
+    ctx.fillStyle = '#64759c';
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '4px';
+    ctx.font = '600 20px system-ui, Segoe UI, Arial';
+    ctx.fillText('MISSION DASHBOARD · NEOLABS ROCKETS', w / 2, h - 60);
+    if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
   }
 })();
