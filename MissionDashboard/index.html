@@ -88,7 +88,7 @@
       <div class="launch-summary-grid">
         <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
         <div class="derived-item continuity-unknown" id="ds-continuity-item"><div class="k">Continuity</div><div class="v" id="ds-continuity">Unknown</div><div class="s">Required to arm · GPIO34</div><button class="continuity-override" id="ds-continuity-override" type="button" hidden>Ignore continuity</button></div>
-        <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div></div>
+        <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ds-temperature-override" type="button" hidden>Ignore limit</button></div>
         <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
         <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
         <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards connected to server</div></div>
@@ -396,7 +396,8 @@
     <div class="camera-stage card">
       <video id="cam-source" playsinline muted></video>
       <canvas id="cam-canvas" width="1280" height="720"></canvas>
-      <canvas id="cam-green-canvas" width="1280" height="720" hidden aria-hidden="true"></canvas>
+      <canvas id="cam-green-canvas" width="1280" height="720" aria-hidden="true" style="position:absolute; pointer-events:none; opacity:0; z-index:-1;"></canvas>
+      <canvas id="cam-stats-canvas" width="1920" height="1080" aria-hidden="true" style="position:absolute; pointer-events:none; opacity:0; z-index:-1;"></canvas>
     </div>
 
     <aside class="card camera-controls">
@@ -404,7 +405,8 @@
       <div class="cam-buttons">
         <button class="sp-save" id="cam-record" type="button" disabled>Start Recording</button>
         <button class="sp-secondary danger" id="cam-stop" type="button" disabled>Stop</button>
-        <button class="sp-secondary" id="cam-download-green" type="button" hidden>Download Green-Screen Overlay</button>
+        <button class="sp-secondary" id="cam-download-green" type="button" hidden>Download Green-Screen</button>
+        <button class="sp-secondary" id="cam-download-stats" type="button" hidden>Download Stats Photo</button>
       </div>
 
       <div class="sp-sec">Launch Link</div>
@@ -522,6 +524,11 @@
           <div><strong id="lc-continuity-title">Waiting for controller</strong><small id="lc-continuity-detail">Continuity is verified by GPIO34 after BLE connects.</small><button class="continuity-override" id="ble-continuity-override" type="button" hidden>Ignore continuity</button></div>
           <div class="continuity-required">Required</div>
         </div>
+        <div class="continuity-check continuity-unknown" id="lc-temperature-check" role="status" aria-live="polite" style="margin-top: 12px;">
+          <div class="continuity-icon" aria-hidden="true"><span></span></div>
+          <div><strong id="lc-temperature-title">Waiting for controller</strong><small id="lc-temperature-detail">Temperature is verified by GPIO35 after BLE connects.</small><button class="continuity-override" id="lc-temperature-override" type="button" hidden>Ignore limit</button></div>
+          <div class="continuity-required">Required</div>
+        </div>
         <div class="launch-checks">
           <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
           <label><input type="checkbox" class="ble-check"> Mission control checked: aircraft, weather, launch location</label>
@@ -542,7 +549,7 @@
         <div class="lc-metrics">
           <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div></div>
           <div class="derived-item"><div class="k">Continuity</div><div class="v" id="ble-continuity">Unknown</div></div>
-          <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ble-temperature">—</div><div class="s" id="ble-temperature-sub">Waiting for controller</div></div>
+          <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ble-temperature">—</div><div class="s" id="ble-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ble-temperature-override" type="button" hidden>Ignore limit</button></div>
           <div class="derived-item"><div class="k">Control path</div><div class="v" id="ble-control-mode">—</div></div>
         </div>
       </section>

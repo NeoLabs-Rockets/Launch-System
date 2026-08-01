@@ -116,6 +116,9 @@ function bindBleUi() {
   on('ble-abort', 'click', abortLaunchCountdown);
   on('ble-continuity-override', 'click', toggleContinuityOverride);
   on('ds-continuity-override', 'click', toggleContinuityOverride);
+  on('ble-temperature-override', 'click', toggleTemperatureOverride);
+  on('ds-temperature-override', 'click', toggleTemperatureOverride);
+  on('lc-temperature-override', 'click', toggleTemperatureOverride);
   on('firmware-update', 'click', runFirmwareUpdate);
   document.querySelectorAll('.ble-check,#ble-code,#ble-count-seconds').forEach(el => {
     el.addEventListener('input', () => { renderLaunch(); });
@@ -423,6 +426,20 @@ async function toggleContinuityOverride() {
   renderLaunch();
 }
 
+async function toggleTemperatureOverride() {
+  const status = currentStatus();
+  const enabled = !status.temperatureOverride;
+  if (enabled && !window.confirm('Ignore the controller temperature limit (40 °C) for this launch session?\n\nDisarm, abort, launch, or BLE loss will restore the interlock automatically.')) return;
+  try {
+    if (!bleLink.connected) await sendRemoteCommand('temperature_override', { enabled });
+    else await sendBle({ cmd: 'temperature_override', enabled: enabled ? 1 : 0 });
+    setLaunchState(enabled ? 'Temperature interlock temporarily bypassed' : 'Temperature interlock restored', enabled ? 'warn' : 'ok');
+  } catch (err) {
+    setLaunchState(`Temperature override failed: ${err.message || err}`, 'bad');
+  }
+  renderLaunch();
+}
+
 async function startLaunchCountdown() {
   const seconds = clamp(Number(el('ble-count-seconds')?.value), 5, 60);
   wakeLockPreflight = true;
@@ -579,6 +596,7 @@ function applyBleStatus(s) {
     locked: !!s.l,
     continuity: s.q === 1 || s.q === true,
     continuityOverride: s.b === 1 || s.b === true,
+    temperatureOverride: s.p === 1 || s.p === true,
     temperatureC: Number.isFinite(s.t) ? s.t : null,
     attemptsLeft: s.left,
     clients: s.n || 0,
@@ -813,9 +831,17 @@ function renderLaunch() {
   setText('ble-control-mode', bleLink.connected ? 'Direct BLE' : reconnecting ? 'Reconnecting' : linked ? 'Shared' : 'Offline');
   setText('ble-continuity', !linked ? 'Unknown' : continuityBypassed ? 'Bypassed' : physicalContinuity ? 'Connected' : 'Open circuit');
   const temperatureText = linked && Number.isFinite(status.temperatureC) ? `${status.temperatureC.toFixed(1)} °C` : '—';
-  const temperatureDetail = overTemperature ? 'Interlock active · 40 °C limit' : linked && Number.isFinite(status.temperatureC) ? 'Live · 10 kΩ NTC on GPIO35' : linked ? 'NTC input invalid · GPIO35' : 'Waiting for controller';
+  const temperatureBypassed = !!status.temperatureOverride;
+  const temperatureDetail = temperatureBypassed
+    ? 'Temporary override is active for this launch session.'
+    : overTemperature
+    ? 'Interlock active · 40 °C limit'
+    : linked && Number.isFinite(status.temperatureC)
+    ? 'Live · 10 kΩ NTC on GPIO35'
+    : linked ? 'NTC input invalid · GPIO35' : 'Waiting for controller';
   setText('ble-temperature', temperatureText);
   setText('ble-temperature-sub', temperatureDetail);
+  setText('ds-temperature-sub', temperatureDetail);
   const linkedName = bleLink.connected || reconnecting
     ? (bleLink.deviceName || 'Linked')
     : (sharedState.ownerName || 'Shared BLE link');
@@ -869,6 +895,32 @@ function renderLaunch() {
     overrideButton.textContent = continuityBypassed ? 'Restore continuity check' : 'Ignore continuity';
     overrideButton.classList.toggle('active', continuityBypassed);
   });
+  
+  const physicalTemperatureHigh = linked && Number.isFinite(status.temperatureC) && status.temperatureC >= 40;
+  [el('ble-temperature-override'), el('ds-temperature-override'), el('lc-temperature-override')].forEach(overrideButton => {
+    if (!overrideButton) return;
+    overrideButton.hidden = !linked || !physicalTemperatureHigh;
+    overrideButton.disabled = reconnecting || selfOwnerDown || !!status.trigger || countdownLive;
+    overrideButton.textContent = temperatureBypassed ? 'Restore limit check' : 'Ignore limit';
+    overrideButton.classList.toggle('active', temperatureBypassed);
+  });
+
+  const temperatureCards = [el('lc-temperature-check')];
+  temperatureCards.forEach(card => {
+    if (!card) return;
+    card.classList.toggle('continuity-ok', linked && !physicalTemperatureHigh);
+    card.classList.toggle('continuity-bypassed', linked && temperatureBypassed);
+    card.classList.toggle('continuity-bad', linked && physicalTemperatureHigh && !temperatureBypassed);
+    card.classList.toggle('continuity-unknown', !linked);
+  });
+  setText('lc-temperature-title', !linked ? 'Waiting for controller' : temperatureBypassed ? 'Temperature limit ignored' : physicalTemperatureHigh ? 'Controller too hot' : 'Temperature normal');
+  setText('lc-temperature-detail', !linked
+    ? 'Temperature is verified by GPIO35 after BLE connects.'
+    : temperatureBypassed
+    ? 'Temporary override is active for this launch session.'
+    : physicalTemperatureHigh
+    ? 'Limit is 40 °C. Let the controller cool down.'
+    : 'GPIO35 reports safe operating temperature.');
 
   // camera.js owns its label so direct/shared state cannot be overwritten by a
   // generic launch-console render. Keep a fallback for pages without that hook.
@@ -973,7 +1025,7 @@ function continuityReady(status = currentStatus()) {
 }
 
 function temperatureInterlockActive(status = currentStatus()) {
-  return Number.isFinite(status.temperatureC) && status.temperatureC >= 40;
+  return !status.temperatureOverride && Number.isFinite(status.temperatureC) && status.temperatureC >= 40;
 }
 
 function clearVisibleCode() {

@@ -54,6 +54,7 @@ NimBLECharacteristic* otaStatusChar = nullptr;
 Adafruit_NeoPixel statusPixel(1, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 bool armed = false, firing = false, countdown = false, locked = false;
 bool continuity = false, continuityRaw = false, continuityOverride = false;
+bool temperatureOverride = false;
 bool otaActive = false, otaShaInitialized = false;
 float temperatureC = NAN;
 unsigned long triggerStarted = 0, lastHeartbeat = 0, lastNotify = 0, continuityChangedAt = 0;
@@ -171,7 +172,7 @@ float readNtcTemperatureC() {
 }
 
 bool temperatureInterlockActive() {
-  return !isnan(temperatureC) && temperatureC >= MAX_SAFE_TEMPERATURE_C;
+  return !temperatureOverride && !isnan(temperatureC) && temperatureC >= MAX_SAFE_TEMPERATURE_C;
 }
 
 void setStatusPixel(uint8_t red, uint8_t green, uint8_t blue) {
@@ -187,6 +188,7 @@ void safeStop(const char* reason) {
   countdown = false;
   firing = false;
   continuityOverride = false;
+  temperatureOverride = false;
   ownerSid = "";
   lastError = reason;
   digitalWrite(RELAY_PIN, LOW);
@@ -202,8 +204,8 @@ void publishStatus() {
   if (isnan(temperatureC)) strcpy(temperatureValue, "null");
   else snprintf(temperatureValue, sizeof(temperatureValue), "%.2f", temperatureC);
   snprintf(data, sizeof(data),
-    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"b\":%d,\"t\":%s,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
-    armed, firing, countdown, locked, continuity, continuityOverride, temperatureValue,
+    "{\"a\":%d,\"f\":%d,\"c\":%d,\"l\":%d,\"q\":%d,\"b\":%d,\"t\":%s,\"p\":%d,\"left\":%d,\"n\":%d,\"u\":%lu,\"e\":\"%s\",\"v\":\"%s\"}",
+    armed, firing, countdown, locked, continuity, continuityOverride, temperatureValue, temperatureOverride,
     locked ? 0 : MAX_ATTEMPTS - attempts, connectedCount, millis(), lastError.c_str(), CURRENT_FIRMWARE_VERSION);
   statusChar->setValue((uint8_t*)data, strlen(data));
   statusChar->notify();
@@ -218,7 +220,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer*, NimBLEConnInfo& connInfo, int) override {
     if (connectedCount > 0) connectedCount--;
     if (otaActive && connInfo.getConnHandle() == otaConnectionHandle) resetOtaState("aborted", "disconnected");
-    if (armed || countdown || continuityOverride) safeStop("owner_lost");
+    if (armed || countdown || continuityOverride || temperatureOverride) safeStop("owner_lost");
     else ownerSid = "";
     NimBLEDevice::getAdvertising()->start();
     publishStatus();
@@ -255,6 +257,23 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
         safeStop("continuity_lost");
       } else {
         continuityOverride = false;
+        if (!armed) ownerSid = "";
+      }
+      publishStatus();
+      return;
+    }
+
+    if (cmd == "temperature_override") {
+      if (firing || countdown) { lastError = "trigger_active"; publishStatus(); return; }
+      if (ownerSid.length() && ownerSid != sid) { lastError = "not_owner"; publishStatus(); return; }
+      const bool enabled = jsonInt(body, "enabled", 0) == 1;
+      if (enabled) {
+        temperatureOverride = true;
+        ownerSid = sid;
+      } else if (armed && !isnan(temperatureC) && temperatureC >= MAX_SAFE_TEMPERATURE_C) {
+        safeStop("over_temperature");
+      } else {
+        temperatureOverride = false;
         if (!armed) ownerSid = "";
       }
       publishStatus();
@@ -541,7 +560,7 @@ void loop() {
   else if (temperatureInterlockActive()) { red = 110; blue = 12; }
   else if (countdown && (now / 100) % 2) { red = 120; green = 28; }
   else if (armed) { red = 90; green = 18; }
-  else if (continuityOverride) { red = 55; green = 28; }
+  else if (continuityOverride || temperatureOverride) { red = 55; green = 28; }
   else if (!continuity) {
     const unsigned long phase = now % 1200;
     if (phase < 90 || (phase >= 180 && phase < 270)) red = 100;
