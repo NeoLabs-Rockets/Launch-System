@@ -104,13 +104,13 @@
     const badge = el('rc-go-badge');
     const label = el('rc-go-label');
     if (!badge || !label) return;
-    badge.classList.remove('go', 'nogo', 'marginal');
+    badge.className = 'go-badge link-badge';
     const map = {
       offline: ['marginal', 'RC'],
       link: ['marginal', 'LINK'],
       ready: ['go', 'READY'],
       rec: ['nogo', 'REC'],
-      flight: ['nogo', 'FLIGHT'],
+      flight: ['nogo', 'FLY'],
       rf: ['marginal', 'RF'],
       error: ['nogo', 'ERR']
     };
@@ -226,10 +226,12 @@
 
     setText('rc-mission', s.m || '—');
     setText('rc-phase', s.ph || '—');
-    setText('rc-recording', rec ? (Number(s.r) === 3 ? 'Post-landing' : 'Recording') : 'Idle');
+    setText('rc-recording', rec ? (Number(s.r) === 3 ? 'Post-land' : 'Recording') : 'Idle');
     setText('rc-sd', sdLabel(s.sd));
-    setText('rc-camera', camLabel(s.cam));
-    setText('rc-fps', s.fps != null ? Number(s.fps).toFixed(1) : (t.fps != null ? Number(t.fps).toFixed(1) : '—'));
+    const fps = s.fps != null ? Number(s.fps).toFixed(0) : (t.fps != null ? Number(t.fps).toFixed(0) : null);
+    const cam = camLabel(s.cam);
+    setText('rc-camera', fps && rocketLink.connected ? `${cam} · ${fps}fps` : cam);
+    setText('rc-fps', fps != null ? String(fps) : '—');
     setText('rc-frames', s.fw != null ? String(s.fw) : '0');
     setText('rc-dropped', s.fd != null ? String(s.fd) : '0');
     setText('rc-free', s.free_kb != null ? `${s.free_kb} KB` : '—');
@@ -273,6 +275,8 @@
       card.classList.toggle('recording', rec);
       card.classList.toggle('in-flight', inFlight || (expectedDisconnect && !rocketLink.connected));
       card.classList.toggle('expected-rf', expectedDisconnect && rocketLink.state !== 'connected');
+      // Keep class names used by older styles
+      card.classList.toggle('rocket-computer-card', true);
     }
     const recItem = el('rc-recording-item');
     if (recItem) recItem.classList.toggle('is-recording', rec);

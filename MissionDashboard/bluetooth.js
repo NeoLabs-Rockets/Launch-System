@@ -913,8 +913,13 @@ function renderLaunch() {
   setText('ds-clients', serverClientCount);
   const dsBadge = el('ds-go-badge');
   const dsLabel = el('ds-go-label');
-  if (dsBadge) dsBadge.className = `go-badge ${!linked || reconnecting || otaBusy ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
+  if (dsBadge) dsBadge.className = `go-badge link-badge ${!linked || reconnecting || otaBusy ? 'marginal' : locked || overTemperature || !hasContinuity || armed ? 'nogo' : continuityBypassed ? 'marginal' : 'go'}`;
   if (dsLabel) dsLabel.textContent = otaBusy ? 'UPDATE' : !linked ? 'LINK' : reconnecting ? 'RELINK' : locked ? 'LOCK' : overTemperature ? 'HOT' : armed ? 'ARMED' : continuityBypassed ? 'BYPASS' : !hasContinuity ? 'OPEN' : 'SAFE';
+  const launchPanel = el('launch-summary-card');
+  if (launchPanel) {
+    launchPanel.classList.toggle('linked', !!linked && !reconnecting);
+    launchPanel.classList.toggle('armed', !!armed || !!countdownLive);
+  }
 
   [el('ds-temperature')?.closest('.temperature-item'), el('ble-temperature')?.closest('.temperature-item')].forEach(card => {
     if (card) card.classList.toggle('temperature-hot', overTemperature);
