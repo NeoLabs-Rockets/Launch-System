@@ -639,3 +639,97 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
   .lc-pip span{display:none}
   .lc-pip b{width:36px;height:36px}
 }
+
+/* Rocket computer dual-BLE panel */
+.rocket-computer-card{margin-top:16px;border-color:rgba(160,120,255,.28)}
+.rocket-computer-card.linked{border-color:rgba(160,120,255,.5)}
+#rocket-computer-card .derived-item{padding:9px 11px;min-height:0}
+#rocket-computer-card .derived-item .v{font-size:1em;margin-top:3px}
+#rocket-computer-card .derived-item .s{font-size:.64em;margin-top:3px}
+#rc-note.ok{color:var(--ok,#36f0a0)}
+
+/* ── Dual BLE mission links (controller + rocket computer) ── */
+.dual-link-pills{display:flex;flex-direction:column;gap:8px;min-width:160px}
+.dual-pill{display:flex;align-items:center;gap:8px;background:rgba(7,11,22,.55);border:1px solid var(--border);
+  border-radius:999px;padding:7px 12px 7px 10px;font-size:.72em;color:var(--muted)}
+.dual-pill.online{border-color:rgba(54,240,160,.35);color:var(--silver)}
+.dual-pill.warn{border-color:rgba(255,179,71,.4)}
+.dual-pill.hot{border-color:rgba(255,74,61,.4)}
+.dual-pill.flight{border-color:rgba(160,120,255,.45);color:#d4c4ff}
+.dual-pill-dot{width:8px;height:8px;border-radius:50%;background:#3a5070;flex-shrink:0}
+.dual-pill-dot.on{background:var(--green);box-shadow:0 0 8px rgba(54,240,160,.55)}
+.dual-pill-dot.pulse{animation:rcPulse 1.2s ease-in-out infinite}
+.dual-pill-label{letter-spacing:.1em;text-transform:uppercase;font-size:.9em;opacity:.75}
+.dual-pill-val{margin-left:auto;font-weight:700;color:inherit}
+
+.dual-link-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:8px}
+.dual-card-metrics{grid-template-columns:repeat(3,1fr)!important}
+#launch-summary-card .dual-card-metrics .derived-item,
+#rocket-computer-card .dual-card-metrics .derived-item{padding:9px 11px;min-height:0}
+#launch-summary-card .dual-card-metrics .derived-item .v,
+#rocket-computer-card .dual-card-metrics .derived-item .v{font-size:1em;margin-top:3px}
+#launch-summary-card .dual-card-metrics .derived-item .s,
+#rocket-computer-card .dual-card-metrics .derived-item .s{font-size:.64em;margin-top:3px}
+
+.rocket-computer-card{border-color:rgba(160,120,255,.28);
+  background:linear-gradient(135deg,rgba(28,22,48,.82),rgba(11,17,33,.82))}
+.rocket-computer-card.linked{border-color:rgba(160,120,255,.5)}
+.rocket-computer-card.recording{border-color:rgba(255,100,140,.5);box-shadow:0 0 28px rgba(255,80,120,.1)}
+.rocket-computer-card.in-flight,
+.rocket-computer-card.expected-rf{border-color:rgba(160,120,255,.55);box-shadow:0 0 28px rgba(140,100,255,.12)}
+#rc-recording-item.is-recording .v{color:#ff7aa2}
+#rc-note.ok{color:var(--green);border-color:rgba(54,240,160,.25);background:rgba(54,240,160,.06)}
+#rc-note.warn{color:var(--amber)}
+
+.rc-telem-row{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
+.rc-telem-chip{background:rgba(7,11,22,.55);border:1px solid rgba(160,120,255,.18);border-radius:8px;
+  padding:6px 9px;font-size:.78em;color:var(--silver);display:flex;gap:6px;align-items:baseline}
+.rc-telem-chip .k{font-size:.72em;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.rc-axes{display:flex;flex-wrap:wrap;gap:10px 14px;font-size:.72em;color:var(--muted);margin:0 0 12px}
+.rc-axes b{color:var(--silver);font-weight:700}
+.rc-axes .rc-err b{color:var(--red)}
+.rc-axes .rc-warn b{color:var(--amber)}
+.rc-actions{grid-template-columns:1fr 1fr;margin-top:4px}
+.rc-actions-adv{grid-template-columns:1fr 1fr;margin-top:8px}
+.rc-advanced{margin:10px 0 8px;border:1px solid rgba(160,120,255,.16);border-radius:8px;
+  background:rgba(7,11,22,.35);padding:8px 12px}
+.rc-advanced summary{cursor:pointer;color:var(--muted);font-size:.78em;letter-spacing:.06em;user-select:none}
+.rc-advanced[open] summary{margin-bottom:8px;color:var(--silver)}
+.rc-advanced-hint{font-size:.7em;color:var(--muted);line-height:1.4;margin:8px 0 0}
+
+.lc-dual-connect{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px}
+.lc-device-card{background:rgba(7,11,22,.5);border:1px solid var(--border);border-radius:12px;padding:14px 14px 12px}
+.lc-device-card.linked{border-color:rgba(54,240,160,.35)}
+.lc-device-card.armed{border-color:rgba(255,74,61,.4)}
+.lc-device-card.recording{border-color:rgba(255,100,140,.45)}
+.lc-device-card.expected-rf{border-color:rgba(160,120,255,.45)}
+#lc-device-rocket.linked{border-color:rgba(160,120,255,.4)}
+.lc-device-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:6px}
+.lc-device-head strong{display:block;font-size:1.05em;color:var(--silver);margin-top:2px}
+.lc-device-desc{font-size:.76em;color:var(--muted);line-height:1.4;margin:0 0 10px}
+.lc-device-badge{font-size:.62em;letter-spacing:.12em;text-transform:uppercase;font-weight:800;
+  border-radius:999px;padding:4px 8px;border:1px solid rgba(77,159,255,.3);color:var(--ice);white-space:nowrap}
+.lc-device-badge.optional{border-color:rgba(160,120,255,.35);color:#d4c4ff}
+.lc-device-badge.ok{border-color:rgba(54,240,160,.4);color:var(--green)}
+.lc-device-badge.rec{border-color:rgba(255,100,140,.45);color:#ff7aa2}
+.lc-metrics.compact{grid-template-columns:1fr;margin-top:10px}
+.continuity-required.optional{opacity:.7;font-size:.65em}
+
+@keyframes rcPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(.85)}}
+
+@media(max-width:980px){
+  .dual-link-grid{grid-template-columns:1fr}
+  .dual-card-metrics{grid-template-columns:1fr 1fr!important}
+  .lc-dual-connect{grid-template-columns:1fr}
+  .dual-link-pills{flex-direction:row;flex-wrap:wrap;min-width:0}
+}
+
+
+.rc-rec-tag{display:inline-block;margin-left:8px;font-size:.55em;letter-spacing:.12em;text-transform:uppercase;
+  font-weight:800;vertical-align:middle;color:#d4c4ff;border:1px solid rgba(160,120,255,.4);
+  border-radius:999px;padding:3px 8px;background:rgba(160,120,255,.1)}
+.lc-device-card.skipped{border-style:dashed;opacity:.92}
+.rocket-computer-card:not(.linked):not(.expected-rf) .go-sub{color:var(--muted)}
+#rc-note.warn{color:var(--amber);border-color:rgba(255,179,71,.25);background:rgba(255,179,71,.06)}
+#lc-rocket-check.continuity-bypassed{border-color:rgba(160,120,255,.28)}
+

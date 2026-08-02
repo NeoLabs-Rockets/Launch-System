@@ -370,6 +370,21 @@ async function armLaunch() {
     setLaunchState('Complete the safety checklist before arming', 'warn');
     return;
   }
+  // Soft recommendation: rocket computer is highly recommended when fitted,
+  // but never mandatory (bare rockets without onboard compute may skip it).
+  if (!window.NeoRocketComputer?.connected?.()) {
+    const proceed = window.confirm(
+      'Rocket computer is not linked.\n\n'
+      + 'Highly recommended when the rocket has onboard compute (video + telemetry).\n'
+      + 'Not required for rockets without an onboard computer.\n\n'
+      + 'Arm the launch controller without onboard recording?'
+    );
+    if (!proceed) {
+      setLaunchState('Arming cancelled — connect rocket computer or confirm flying without it', 'warn');
+      renderLaunch();
+      return;
+    }
+  }
   // Gate on dashboard GO state — read the badge and any specific NO-GO factors
   const goBadge = el('go-badge');
   if (goBadge?.classList.contains('nogo') || goBadge?.classList.contains('marginal')) {
@@ -391,7 +406,8 @@ async function armLaunch() {
   ensureLaunchWakeLock();
   try {
     await armWithCode('');
-    setLaunchState('Arm command sent', 'warn');
+    const withRc = window.NeoRocketComputer?.connected?.();
+    setLaunchState(withRc ? 'Arm command sent · rocket computer recording requested' : 'Arm command sent · controller only (no onboard recorder)', 'warn');
   } catch (err) {
     clearLaunchCredential();
     setLaunchState(`Arm failed: ${err.message || err}`, 'bad');
@@ -442,12 +458,26 @@ async function toggleTemperatureOverride() {
 
 async function startLaunchCountdown() {
   const seconds = clamp(Number(el('ble-count-seconds')?.value), 5, 60);
+  if (!window.NeoRocketComputer?.connected?.()) {
+    const proceed = window.confirm(
+      'Starting countdown without a rocket computer.\n\n'
+      + 'Onboard video/telemetry will not be recorded.\n'
+      + 'This is fine for rockets without onboard compute.\n\n'
+      + 'Start countdown on the launch controller only?'
+    );
+    if (!proceed) {
+      setLaunchState('Countdown cancelled — connect rocket computer or confirm controller-only launch', 'warn');
+      renderLaunch();
+      return;
+    }
+  }
   wakeLockPreflight = true;
   ensureLaunchWakeLock();
   primeLaunchSpeech();
   try {
     await startCountdownWithCode(seconds, '');
-    setLaunchState('Live BLE countdown active', 'bad');
+    const withRc = window.NeoRocketComputer?.connected?.();
+    setLaunchState(withRc ? 'Live BLE countdown active · rocket computer synced' : 'Live BLE countdown active · controller only', 'bad');
   } catch (err) {
     setLaunchState(`Countdown rejected: ${err.message || err}`, 'bad');
   } finally {
@@ -484,6 +514,7 @@ async function runLaunchCountdownTick() {
     try {
       await sendBle({ cmd: 'trigger' });
       clearLaunchCredential();
+      try { await window.NeoRocketComputer?.onIgnition?.(); } catch (_) {}
     } catch (err) {
       setLaunchState(`Trigger rejected: ${err.message || err}`, 'bad');
     }
@@ -498,6 +529,11 @@ function startLaunchHeartbeat() {
     if (!launchCountdownActive || !bleLink.connected) return;
     const left = Math.max(0, Math.ceil((launchCountdownEndsAt - Date.now()) / 1000));
     try { await sendBle({ cmd: 'heartbeat', left }); } catch (_) {}
+    // Light-touch sync of remaining time to rocket computer (best effort; never
+    // blocks the controller heartbeat path).
+    if (left > 0 && left % 2 === 0) {
+      try { window.NeoRocketComputer?.onCountdownUpdate?.(left); } catch (_) {}
+    }
     // Schedule only after the previous GATT write settled. Slow Chrome/macOS
     // writes can otherwise build an ever-growing queue and starve the ESP32's
     // three-second heartbeat watchdog.
@@ -522,6 +558,10 @@ async function abortLaunchCountdown() {
 async function armWithCode(code) {
   if (!bleLink.connected) return sendRemoteCommand('arm', { code });
   await sendBle({ cmd: 'arm' });
+  // Mirror to rocket computer (independent BLE link). Failures must not block launch arm.
+  try { await window.NeoRocketComputer?.onArm?.(); } catch (err) {
+    console.warn('[rocket] arm mirror failed:', err);
+  }
   clearVisibleCode();
   renderLaunch();
 }
@@ -529,6 +569,9 @@ async function armWithCode(code) {
 async function disarmController() {
   if (!bleLink.connected && sharedState.ownerActive) return sendRemoteCommand('disarm');
   await sendBle({ cmd: 'disarm' });
+  try { await window.NeoRocketComputer?.onDisarm?.(); } catch (err) {
+    console.warn('[rocket] disarm mirror failed:', err);
+  }
   stopLaunchHeartbeat();
   cancelLaunchSpeech();
   stopLaunchCountdownUi('Disarmed');
@@ -540,6 +583,9 @@ async function disarmController() {
 async function startCountdownWithCode(seconds, code) {
   if (!bleLink.connected) return sendRemoteCommand('countdown_start', { seconds, code });
   await sendBle({ cmd: 'countdown_start', seconds });
+  try { await window.NeoRocketComputer?.onCountdownStart?.(seconds); } catch (err) {
+    console.warn('[rocket] countdown mirror failed:', err);
+  }
   launchCountdownEndsAt = Date.now() + seconds * 1000;
   launchCountdownActive = true;
   launchCountdownStartedAt = Date.now();
@@ -555,6 +601,7 @@ async function startCountdownWithCode(seconds, code) {
 async function abortController() {
   if (!bleLink.connected && sharedState.ownerActive) {
     await sendRemoteCommand('abort');
+    try { await window.NeoRocketComputer?.onAbort?.('remote_abort'); } catch (_) {}
     renderLaunch();
     return;
   }
@@ -568,6 +615,7 @@ async function abortController() {
   if (bleLink.connected) {
     try { await sendBle({ cmd: 'abort' }); } catch (_) {}
   }
+  try { await window.NeoRocketComputer?.onAbort?.('manual_abort'); } catch (_) {}
   if (wasActive) setLaunchState('Countdown aborted', 'warn');
   renderLaunch();
 }
@@ -958,6 +1006,44 @@ function renderLaunch() {
   }
 
   updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnecting);
+  updateControllerLinkPill(linked, reconnecting, armed, countdownLive);
+  setText('lc-cd-ctrl', countdownLive
+    ? (launchCountdownActive ? 'Heartbeat live' : 'Shared countdown')
+    : armed ? 'Armed · idle' : linked ? 'Linked · idle' : 'Offline');
+  // Keep rocket computer console fields in sync when launch UI re-renders.
+  try { window.NeoRocketComputer?.render?.(); } catch (_) {}
+}
+
+function updateControllerLinkPill(linked, reconnecting, armed, countdownLive) {
+  const pill = el('pill-lc');
+  const dot = el('pill-lc-dot');
+  let text = 'Offline';
+  if (reconnecting) text = 'Retry';
+  else if (countdownLive) text = 'Countdown';
+  else if (armed) text = 'Armed';
+  else if (linked) text = 'Linked';
+  setText('pill-lc-val', text);
+  if (pill) {
+    pill.classList.toggle('online', !!linked && !reconnecting);
+    pill.classList.toggle('warn', !!reconnecting);
+    pill.classList.toggle('hot', !!armed || !!countdownLive);
+  }
+  if (dot) {
+    dot.classList.toggle('on', !!linked);
+    dot.classList.toggle('pulse', !!countdownLive || !!armed);
+  }
+
+  const ctrlCard = el('lc-device-controller');
+  if (ctrlCard) {
+    ctrlCard.classList.toggle('linked', !!linked);
+    ctrlCard.classList.toggle('armed', !!armed || !!countdownLive);
+  }
+  const ctrlBadge = el('lc-ctrl-badge');
+  if (ctrlBadge) {
+    ctrlBadge.textContent = countdownLive ? 'Countdown' : armed ? 'Armed' : linked ? 'Linked' : 'Required';
+    ctrlBadge.classList.toggle('ok', !!linked && !armed && !countdownLive);
+    ctrlBadge.classList.toggle('rec', !!armed || !!countdownLive);
+  }
 }
 
 function updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnecting) {
@@ -978,16 +1064,34 @@ function updateLaunchNote(bluetoothSupported, linked, armed, locked, reconnectin
     note.textContent = 'BLE host is backgrounded — keep its tab visible and screen awake for reliable heartbeats.';
     return;
   }
-  if (lcStep === 0) note.textContent = linked
-    ? `Linked${currentStatus().firmwareVersion ? ` · firmware ${currentStatus().firmwareVersion}` : ''}. Continue to the checklist.`
-    : 'Pair the NeoLabs controller to begin.';
-  else if (lcStep === 1) note.textContent = temperatureInterlockActive()
+  if (lcStep === 0) {
+    const rc = window.NeoRocketComputer?.connected?.()
+      ? ' · rocket computer linked'
+      : ' · rocket computer highly recommended (skip if no onboard compute)';
+    note.textContent = linked
+      ? `Controller linked${currentStatus().firmwareVersion ? ` · fw ${currentStatus().firmwareVersion}` : ''}${rc}. Continue to checklist.`
+      : 'Connect the launch controller (required). Rocket computer is highly recommended when fitted, not mandatory.';
+  } else if (lcStep === 1) note.textContent = temperatureInterlockActive()
     ? 'Arming locked: controller temperature must fall below 40 °C.'
     : continuityReady()
-      ? 'Continuity verified. Confirm every checklist item to enable arming.'
+      ? 'Continuity verified. Confirm every required checklist item. Rocket computer is not required to arm.'
       : 'Arming locked: motor/igniter continuity is required.';
-  else if (lcStep === 2) note.textContent = armed ? 'Armed. Continue to the launch step.' : 'Review launch conditions, then arm.';
-  else note.textContent = 'Hold for a clear range and airspace, then start the countdown. Abort is always available.';
+  else if (lcStep === 2) {
+    const rcRec = window.NeoRocketComputer?.isRecording?.();
+    const rcOn = window.NeoRocketComputer?.connected?.();
+    note.textContent = armed
+      ? (rcRec ? 'Armed · onboard recording active. Continue to launch.'
+        : rcOn ? 'Armed · rocket computer linked. Continue to launch.'
+        : 'Armed · controller only (no onboard recorder). Continue to launch.')
+      : (rcOn
+        ? 'Arming will also start rocket computer recording when linked.'
+        : 'Arming does not require a rocket computer. Link one first if this rocket has onboard compute.');
+  } else {
+    const rcOn = window.NeoRocketComputer?.connected?.();
+    note.textContent = rcOn
+      ? 'Hold for a clear range and airspace, then start the countdown. Rocket RF loss after liftoff is expected.'
+      : 'Hold for a clear range and airspace, then start the countdown. Flying without rocket computer is allowed when the airframe has no onboard compute.';
+  }
 }
 
 function checkLaunchLinkHealth() {

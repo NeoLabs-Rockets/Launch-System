@@ -70,32 +70,100 @@
       <div>
         <div class="lbl">Mission Control</div>
         <h1>Launch Readiness</h1>
-        <p>BLE controller, weather, airspace, and recovery checks in one operations view.</p>
+        <p>Launch controller is required for ignition. Rocket computer is highly recommended for video &amp; telemetry when the rocket has onboard compute — optional for bare airframes.</p>
+      </div>
+      <div class="dual-link-pills" aria-label="BLE link summary">
+        <div class="dual-pill" id="pill-lc">
+          <span class="dual-pill-dot" id="pill-lc-dot"></span>
+          <span class="dual-pill-label">Controller</span>
+          <span class="dual-pill-val" id="pill-lc-val">Offline</span>
+        </div>
+        <div class="dual-pill" id="pill-rc">
+          <span class="dual-pill-dot" id="pill-rc-dot"></span>
+          <span class="dual-pill-label">Rocket PC</span>
+          <span class="dual-pill-val" id="pill-rc-val">Skip OK</span>
+        </div>
       </div>
     </div>
 
-    <section class="card launch-ble-card" id="launch-summary-card">
-      <div class="card-head">
-        <div>
-          <div class="lbl">Launch Controller</div>
-          <div class="launch-link-state" id="ds-link">Not connected</div>
+    <div class="dual-link-grid">
+      <section class="card launch-ble-card" id="launch-summary-card">
+        <div class="card-head">
+          <div>
+            <div class="lbl">Launch Controller</div>
+            <div class="launch-link-state" id="ds-link">Not connected</div>
+          </div>
+          <div class="go-badge marginal" id="ds-go-badge">
+            <div class="go-label" id="ds-go-label">LINK</div>
+            <div class="go-sub">Ignition</div>
+          </div>
         </div>
-        <div class="go-badge marginal" id="ds-go-badge">
-          <div class="go-label" id="ds-go-label">LINK</div>
-          <div class="go-sub">Controller</div>
+        <div class="launch-summary-grid dual-card-metrics">
+          <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Fires motor · relay + continuity</div></div>
+          <div class="derived-item continuity-unknown" id="ds-continuity-item"><div class="k">Continuity</div><div class="v" id="ds-continuity">Unknown</div><div class="s">Required to arm · GPIO34</div><button class="continuity-override" id="ds-continuity-override" type="button" hidden>Ignore continuity</button></div>
+          <div class="derived-item temperature-item"><div class="k">Controller temp</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ds-temperature-override" type="button" hidden>Ignore limit</button></div>
+          <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
+          <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
+          <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards on server</div></div>
         </div>
-      </div>
-      <div class="launch-summary-grid">
-        <div class="derived-item"><div class="k">Link</div><div class="v" id="ds-link-state">Offline</div><div class="s">Shared across all views</div></div>
-        <div class="derived-item continuity-unknown" id="ds-continuity-item"><div class="k">Continuity</div><div class="v" id="ds-continuity">Unknown</div><div class="s">Required to arm · GPIO34</div><button class="continuity-override" id="ds-continuity-override" type="button" hidden>Ignore continuity</button></div>
-        <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ds-temperature">—</div><div class="s" id="ds-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ds-temperature-override" type="button" hidden>Ignore limit</button></div>
-        <div class="derived-item"><div class="k">Armed</div><div class="v" id="ds-armed">No</div><div class="s">Checklist protected</div></div>
-        <div class="derived-item"><div class="k">Countdown</div><div class="v" id="ds-countdown">Idle</div><div class="s" id="ds-countdown-sub">No active sequence</div></div>
-        <div class="derived-item"><div class="k">Clients</div><div class="v" id="ds-clients">1</div><div class="s">Dashboards connected to server</div></div>
-      </div>
-      <button class="sp-save lc-open-btn" id="open-launch-dashboard" type="button">▲ Open Launch Console</button>
-      <div class="finder-note">Connect, complete the checklist, arm, and run the countdown from the guided Launch Console. Additional devices join with the ESP32 launch code. Active link loss during countdown forces a safe stop.</div>
-    </section>
+        <button class="sp-save lc-open-btn" id="open-launch-dashboard" type="button">▲ Open Launch Console</button>
+        <div class="finder-note">Guided flow: connect controller (required) → optionally rocket computer → checklist → arm → countdown. Controller link loss during countdown safe-stops ignition. Rocket computer is highly recommended when fitted, never required.</div>
+      </section>
+
+      <section class="card launch-ble-card rocket-computer-card" id="rocket-computer-card">
+        <div class="card-head">
+          <div>
+            <div class="lbl">Rocket Computer <span class="rc-rec-tag">Highly recommended</span></div>
+            <div class="launch-link-state" id="rc-link">Not connected</div>
+          </div>
+          <div class="go-badge marginal" id="rc-go-badge">
+            <div class="go-label" id="rc-go-label">RC</div>
+            <div class="go-sub">Optional</div>
+          </div>
+        </div>
+        <div class="launch-summary-grid dual-card-metrics">
+          <div class="derived-item"><div class="k">Link</div><div class="v" id="rc-link-state">Offline</div><div class="s" id="rc-device">XIAO ESP32-S3 Sense</div></div>
+          <div class="derived-item"><div class="k">Last contact</div><div class="v" id="rc-last-contact">—</div><div class="s" id="rc-rf-note">RF loss after liftoff expected</div></div>
+          <div class="derived-item"><div class="k">Mission / phase</div><div class="v" id="rc-mission">—</div><div class="s">Phase <span id="rc-phase">—</span></div></div>
+          <div class="derived-item" id="rc-recording-item"><div class="k">Recording</div><div class="v" id="rc-recording">Idle</div><div class="s">SD <span id="rc-sd">—</span> · free <span id="rc-free">—</span></div></div>
+          <div class="derived-item"><div class="k">Camera</div><div class="v" id="rc-camera">—</div><div class="s"><span id="rc-fps">—</span> fps · <span id="rc-frames">0</span> fr · drop <span id="rc-dropped">0</span></div></div>
+          <div class="derived-item"><div class="k">Countdown / liftoff</div><div class="v" id="rc-countdown">Idle</div><div class="s">Liftoff <span id="rc-liftoff">—</span></div></div>
+        </div>
+        <div class="rc-telem-row" id="rc-telem-row" hidden>
+          <div class="rc-telem-chip"><span class="k">|a|</span><span id="rc-amag">—</span></div>
+          <div class="rc-telem-chip"><span class="k">Alt</span><span id="rc-alt">—</span></div>
+          <div class="rc-telem-chip"><span class="k">Vz</span><span id="rc-vz">—</span></div>
+          <div class="rc-telem-chip"><span class="k">P</span><span id="rc-pressure">—</span></div>
+          <div class="rc-telem-chip"><span class="k">BMP</span><span id="rc-temp-bmp">—</span></div>
+          <div class="rc-telem-chip"><span class="k">IMU</span><span id="rc-temp-imu">—</span></div>
+          <div class="rc-telem-chip"><span class="k">MCU</span><span id="rc-temp-mcu">—</span></div>
+        </div>
+        <div class="rc-axes" id="rc-axes" hidden>
+          <span>X <b id="rc-ax">—</b></span>
+          <span>Y <b id="rc-ay">—</b></span>
+          <span>Z <b id="rc-az">—</b></span>
+          <span class="rc-err" id="rc-error-wrap">Err <b id="rc-error">—</b></span>
+          <span class="rc-warn" id="rc-warning-wrap">Warn <b id="rc-warning">—</b></span>
+        </div>
+        <div class="launch-buttons rc-actions">
+          <button class="sp-save" id="rc-connect" type="button">Connect rocket computer</button>
+          <button class="sp-secondary" id="rc-disconnect" type="button" disabled>Disconnect</button>
+        </div>
+        <details class="rc-advanced">
+          <summary>Advanced onboard controls</summary>
+          <div class="launch-buttons rc-actions-adv">
+            <button class="sp-secondary" id="rc-arm" type="button" disabled>Arm / record</button>
+            <button class="sp-secondary" id="rc-disarm" type="button" disabled>Disarm</button>
+            <button class="sp-secondary" id="rc-start-rec" type="button" disabled>Start recording</button>
+            <button class="sp-secondary" id="rc-stop-rec" type="button" disabled>Stop recording</button>
+            <button class="sp-secondary danger" id="rc-abort" type="button" disabled>Abort mission</button>
+            <button class="sp-secondary" id="rc-ground-test" type="button" disabled>Ground test sim</button>
+          </div>
+          <p class="rc-advanced-hint">Prefer the Launch Console: arming the controller also arms the rocket computer when linked. These buttons are for diagnostics only.</p>
+        </details>
+        <div class="finder-note" id="rc-note">Highly recommended when the rocket carries an onboard computer. Skip for rockets without onboard compute — launch still works with the controller alone. Records video + telemetry only; never ignites.</div>
+      </section>
+    </div>
   </section>
 
   <div class="rocket-badge" id="rocket-badge" role="button" tabindex="0" aria-label="Edit rocket profile">
@@ -504,16 +572,47 @@
 
     <div class="lc-body">
       <section class="lc-panel active" data-panel="0">
-        <h3>Connect the controller</h3>
-        <p>Pair the NeoLabs ESP32 over Bluetooth. A single shared link drives every view for maximum reliability.</p>
-        <div class="lc-actions">
-          <button class="sp-secondary" id="ble-connect" type="button">Connect BLE</button>
-          <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
+        <h3>Connect mission links</h3>
+        <p>The launch controller is required. The rocket computer is highly recommended for rockets with onboard compute, and can be skipped for airframes that do not carry one.</p>
+
+        <div class="lc-dual-connect">
+          <div class="lc-device-card" id="lc-device-controller">
+            <div class="lc-device-head">
+              <div>
+                <div class="lbl">1 · Launch Controller</div>
+                <strong id="lc-m-link">Offline</strong>
+              </div>
+              <span class="lc-device-badge" id="lc-ctrl-badge">Required</span>
+            </div>
+            <p class="lc-device-desc">NeoLabs Launch Controller — relay, continuity, countdown heartbeat. Required for ignition.</p>
+            <div class="lc-actions">
+              <button class="sp-secondary" id="ble-connect" type="button">Connect controller</button>
+              <button class="sp-secondary danger" id="ble-disconnect" type="button" disabled>Disconnect</button>
+            </div>
+            <div class="lc-metrics compact">
+              <div class="derived-item"><div class="k">Centrals</div><div class="v" id="ble-clients">0</div><div class="s" id="ble-clients-sub">ESP32-reported</div></div>
+            </div>
+          </div>
+
+          <div class="lc-device-card" id="lc-device-rocket">
+            <div class="lc-device-head">
+              <div>
+                <div class="lbl">2 · Rocket Computer</div>
+                <strong id="lc-rc-link">Offline</strong>
+              </div>
+              <span class="lc-device-badge optional" id="lc-rc-badge">Highly recommended</span>
+            </div>
+            <p class="lc-device-desc">Onboard XIAO Sense — camera, IMU, baro, microSD. Highly recommended when fitted. Not required for rockets without onboard compute. Never fires the motor.</p>
+            <div class="lc-actions">
+              <button class="sp-secondary" id="lc-rc-connect" type="button">Connect rocket computer</button>
+              <button class="sp-secondary danger" id="lc-rc-disconnect" type="button" disabled>Disconnect</button>
+            </div>
+            <div class="lc-metrics compact">
+              <div class="derived-item"><div class="k">Recording</div><div class="v" id="lc-rc-recording">Idle</div><div class="s" id="lc-rc-health">Skip if this rocket has no onboard computer</div></div>
+            </div>
+          </div>
         </div>
-        <div class="lc-metrics">
-          <div class="derived-item"><div class="k">Link</div><div class="v" id="lc-m-link">Offline</div></div>
-          <div class="derived-item"><div class="k">Clients</div><div class="v" id="ble-clients">0</div><div class="s" id="ble-clients-sub">ESP32-reported centrals</div></div>
-        </div>
+        <div class="finder-note" id="lc-rc-skip-note" style="margin-top:12px">You can continue without the rocket computer. Arming and countdown only require the launch controller.</div>
       </section>
 
       <section class="lc-panel" data-panel="1">
@@ -529,6 +628,14 @@
           <div><strong id="lc-temperature-title">Waiting for controller</strong><small id="lc-temperature-detail">Temperature is verified by GPIO35 after BLE connects.</small><button class="continuity-override" id="lc-temperature-override" type="button" hidden>Ignore limit</button></div>
           <div class="continuity-required">Required</div>
         </div>
+        <div class="continuity-check continuity-unknown" id="lc-rocket-check" role="status" aria-live="polite" style="margin-top: 12px;">
+          <div class="continuity-icon" aria-hidden="true"><span></span></div>
+          <div>
+            <strong id="lc-rocket-title">Rocket computer highly recommended</strong>
+            <small id="lc-rocket-detail">Link onboard video/telemetry when the rocket has a computer. Not required for bare airframes — does not block arming.</small>
+          </div>
+          <div class="continuity-required optional">Not required</div>
+        </div>
         <div class="launch-checks">
           <label><input type="checkbox" class="ble-check"> Area clear and safe distance confirmed</label>
           <label><input type="checkbox" class="ble-check"> Mission control checked: aircraft, weather, launch location</label>
@@ -539,15 +646,16 @@
       </section>
 
       <section class="lc-panel" data-panel="2">
-        <h3>Arm the controller</h3>
-        <p>The controller can be armed after the shared safety checklist is complete.</p>
+        <h3>Arm systems</h3>
+        <p>Arming always targets the launch controller. If a rocket computer is linked, it is armed too and starts video/telemetry recording. Without onboard compute, arm controller-only.</p>
         <div class="lc-actions">
           <button class="sp-secondary" id="ble-arm" type="button" disabled>Arm</button>
           <button class="sp-secondary danger" id="ble-disarm" type="button" disabled>Disarm</button>
         </div>
         <div id="lc-nogo-warn" class="lc-nogo-warn" style="display:none"></div>
         <div class="lc-metrics">
-          <div class="derived-item"><div class="k">Armed</div><div class="v" id="ble-armed">No</div></div>
+          <div class="derived-item"><div class="k">Controller armed</div><div class="v" id="ble-armed">No</div></div>
+          <div class="derived-item"><div class="k">Onboard recording</div><div class="v" id="lc-rc-armed-rec">—</div><div class="s" id="lc-rc-armed-sub">Optional · only when rocket computer is linked</div></div>
           <div class="derived-item"><div class="k">Continuity</div><div class="v" id="ble-continuity">Unknown</div></div>
           <div class="derived-item temperature-item"><div class="k">Controller temperature</div><div class="v" id="ble-temperature">—</div><div class="s" id="ble-temperature-sub">Waiting for controller</div><button class="continuity-override" id="ble-temperature-override" type="button" hidden>Ignore limit</button></div>
           <div class="derived-item"><div class="k">Control path</div><div class="v" id="ble-control-mode">—</div></div>
@@ -563,6 +671,10 @@
             <label for="ble-count-seconds">Countdown seconds</label>
             <input id="ble-count-seconds" type="number" min="5" max="60" value="10">
           </div>
+        </div>
+        <div class="lc-metrics" style="margin:12px 0">
+          <div class="derived-item"><div class="k">Controller</div><div class="v" id="lc-cd-ctrl">—</div><div class="s">Heartbeat required</div></div>
+          <div class="derived-item"><div class="k">Rocket computer</div><div class="v" id="lc-cd-rc">—</div><div class="s">Optional · continues after RF loss if linked</div></div>
         </div>
         <div class="launch-buttons">
           <button class="sp-save" id="ble-launch" type="button" disabled>Start Launch Countdown</button>
@@ -724,8 +836,10 @@
 
 <script src="/fx.js" defer></script>
 <script src="/ble-link.js" defer></script>
+<script src="/rocket-ble-link.js" defer></script>
 <script src="/launch-sync.js" defer></script>
 <script src="/bluetooth.js" defer></script>
+<script src="/rocket-computer.js" defer></script>
 <script src="/app.js" defer></script>
 <script src="/finder.js" defer></script>
 <script src="/camera.js" defer></script>
