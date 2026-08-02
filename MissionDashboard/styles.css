@@ -862,3 +862,37 @@ header{box-shadow:0 1px 0 rgba(77,159,255,.06),0 8px 30px rgba(0,0,0,.35)}
   .mission-console-head{flex-direction:column;align-items:flex-start}
 }
 
+
+/* ── RC Data tab ── */
+.rc-data-page{max-width:1100px}
+.rcd-hero{margin:0 0 18px}
+.rcd-hero h1{margin:4px 0 8px;font-size:1.8em;color:#fff}
+.rcd-hero p{margin:0;max-width:640px;color:var(--muted);font-size:.9em;line-height:1.45}
+.rcd-layout{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;align-items:start}
+.rcd-side{display:flex;flex-direction:column;gap:12px}
+.rcd-kv{display:flex;justify-content:space-between;gap:10px;font-size:.84em;color:var(--muted)}
+.rcd-kv strong{color:var(--silver);font-weight:700;text-align:right;overflow-wrap:anywhere}
+.rcd-actions{display:grid;gap:8px}
+.rcd-actions .sp-save,.rcd-actions .sp-secondary{width:100%;margin:0}
+.rcd-main .card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.rcd-progress{margin-bottom:14px}
+.rcd-progress-track{height:8px;border-radius:999px;background:rgba(255,255,255,.06);overflow:hidden;border:1px solid var(--border)}
+.rcd-progress-fill{height:100%;width:0;background:linear-gradient(90deg,#7c5cff,#4d9fff);transition:width .2s ease}
+.rcd-progress-text{margin-top:6px;font-size:.74em;color:var(--muted)}
+#rcd-status.ok{color:var(--green)}
+#rcd-status.warn{color:var(--amber)}
+#rcd-status.bad{color:var(--red)}
+.rcd-flight-list{display:grid;gap:8px}
+.rcd-flight{text-align:left;width:100%;cursor:pointer;border:1px solid var(--border);border-radius:10px;
+  background:rgba(7,11,22,.5);padding:12px 14px;color:inherit;font:inherit}
+.rcd-flight:hover{border-color:rgba(160,120,255,.4)}
+.rcd-flight.active{border-color:rgba(160,120,255,.65);background:rgba(160,120,255,.1)}
+.rcd-flight.disabled,.rcd-flight:disabled{opacity:.55;cursor:not-allowed}
+.rcd-flight-name{font-weight:800;color:var(--silver);margin-bottom:6px}
+.rcd-flight-meta{display:flex;flex-wrap:wrap;gap:6px}
+.rcd-tag{font-size:.62em;letter-spacing:.08em;text-transform:uppercase;font-weight:700;
+  border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:3px 8px;color:var(--muted)}
+.rcd-tag.hot{border-color:rgba(255,74,61,.4);color:#ff9b92}
+.rcd-tag.warn{border-color:rgba(255,179,71,.4);color:var(--amber)}
+.rcd-empty{padding:24px;text-align:center;color:var(--muted);font-size:.88em;border:1px dashed var(--border);border-radius:10px}
+@media(max-width:900px){.rcd-layout{grid-template-columns:1fr}}

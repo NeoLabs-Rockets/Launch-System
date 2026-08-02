@@ -44,6 +44,7 @@
       <a href="/" data-view="dashboard" class="active">Dashboard</a>
       <a href="/finder.html" data-view="finder">Location Finder</a>
       <a href="/camera.html" data-view="camera">Camera</a>
+      <a href="/rc-data.html" data-view="rcdata">RC Data</a>
     </nav>
     <button class="hdr-launch" id="hdr-launch" type="button">▲ Launch Console</button>
     <div class="hdr-dot"></div>
@@ -569,6 +570,48 @@
     </aside>
   </section>
 </section>
+
+<!-- ══════════════════════════════ RC DATA ══════════════════════════════ -->
+<section class="view rc-data-page" id="view-rcdata">
+  <div class="rcd-hero">
+    <div>
+      <div class="lbl">Rocket Computer</div>
+      <h1>Flight Data</h1>
+      <p>Download telemetry and video from the onboard microSD over Bluetooth. Files are packed into a ZIP on this computer. After download you can delete the flight on the rocket computer.</p>
+    </div>
+  </div>
+
+  <div class="rcd-layout">
+    <aside class="card rcd-side">
+      <div class="lbl">Connection</div>
+      <div class="rcd-kv"><span>Link</span><strong id="rcd-link">Not connected</strong></div>
+      <div class="rcd-kv"><span>File transfer</span><strong id="rcd-xfer">—</strong></div>
+      <div class="rcd-actions">
+        <button class="sp-save" id="rcd-connect" type="button">Connect rocket computer</button>
+        <button class="sp-secondary" id="rcd-disconnect" type="button" disabled>Disconnect</button>
+        <button class="sp-secondary" id="rcd-refresh" type="button" disabled>Refresh flights</button>
+      </div>
+      <div class="finder-note">Uses the same BLE link as Mission Control. Stop recording before download. Large videos transfer slowly over BLE.</div>
+    </aside>
+
+    <section class="card rcd-main">
+      <div class="card-head">
+        <div>
+          <div class="lbl">Flights on microSD</div>
+          <div class="launch-link-state" id="rcd-status">Connect to browse flights.</div>
+        </div>
+        <button class="sp-save" id="rcd-download" type="button" disabled>Download ZIP</button>
+      </div>
+      <div class="rcd-progress" aria-hidden="false">
+        <div class="rcd-progress-track"><div class="rcd-progress-fill" id="rcd-progress-fill"></div></div>
+        <div class="rcd-progress-text" id="rcd-progress-text">Idle</div>
+      </div>
+      <div id="rcd-flight-list" class="rcd-flight-list">
+        <div class="rcd-empty">No flights loaded.</div>
+      </div>
+    </section>
+  </div>
+</section>
 </main>
 
 <footer id="footer-ts">NeoLabs Rockets · Mission Dashboard · Auto-refreshes every 5 min</footer>
@@ -844,7 +887,7 @@
       <div class="sp-dr"><span class="sp-dk">Recovery Drift At Safe Wind</span><span class="sp-dv" id="sp-drift">—</span></div>
     </div>
 
-    <div class="sp-sec">Controller Firmware</div>
+    <div class="sp-sec">Launch Controller Firmware</div>
     <div class="firmware-update-card" id="firmware-update-card">
       <div class="sp-dr"><span class="sp-dk">Installed</span><span class="sp-dv" id="firmware-current">Not connected</span></div>
       <div class="sp-dr"><span class="sp-dk">Available</span><span class="sp-dv" id="firmware-available">Check for updates</span></div>
@@ -855,16 +898,29 @@
       <button class="sp-save" id="firmware-update" type="button" disabled>Check &amp; Update</button>
     </div>
 
+    <div class="sp-sec">Rocket Computer Firmware</div>
+    <div class="firmware-update-card" id="rc-firmware-update-card">
+      <div class="sp-dr"><span class="sp-dk">Installed</span><span class="sp-dv" id="rc-firmware-current">Not connected</span></div>
+      <div class="sp-dr"><span class="sp-dk">Available</span><span class="sp-dv" id="rc-firmware-available">Check for updates</span></div>
+      <div class="firmware-progress" id="rc-firmware-progress" hidden>
+        <div class="firmware-progress-fill" id="rc-firmware-progress-fill"></div>
+      </div>
+      <div class="sp-help" id="rc-firmware-update-status">Connect the rocket computer over BLE to update it. Stop recording first.</div>
+      <button class="sp-save" id="rc-firmware-update" type="button" disabled>Check &amp; Update RC</button>
+    </div>
+
     <button class="sp-save" id="settings-save" type="button">Save Current Profile</button>
   </div>
 </aside>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
 <script src="/fx.js" defer></script>
 <script src="/ble-link.js" defer></script>
 <script src="/rocket-ble-link.js" defer></script>
 <script src="/launch-sync.js" defer></script>
 <script src="/bluetooth.js" defer></script>
 <script src="/rocket-computer.js" defer></script>
+<script src="/rc-data.js" defer></script>
 <script src="/app.js" defer></script>
 <script src="/finder.js" defer></script>
 <script src="/camera.js" defer></script>

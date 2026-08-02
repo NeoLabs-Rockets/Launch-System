@@ -13,6 +13,11 @@
   let telemetry = null;
   let expectedDisconnect = false;
   let lastErrorText = '';
+  let firmwareUpdateBusy = false;
+  let firmwareAvailableVersion = '';
+  let firmwareUpdateMessage = '';
+  let firmwareUpdateTone = '';
+  let firmwareProgressPercent = 0;
 
   function el(id) { return document.getElementById(id); }
   function setText(id, value) {
@@ -331,6 +336,120 @@
 
     updatePills();
     updateLaunchConsole();
+    renderFirmwareUpdate();
+  }
+
+  function firmwareVersionOf(s) {
+    return (s && (s.ver || (typeof s.v === 'string' ? s.v : ''))) || '';
+  }
+
+  function safeForOta() {
+    if (!rocketLink.connected) return false;
+    if (rocketLink.otaInProgress || firmwareUpdateBusy) return false;
+    if (isRecording(status) || phaseLooksInFlight(status)) return false;
+    if (status?.m === 'COUNTDOWN' || status?.m === 'IGNITION_EXPECTED') return false;
+    return true;
+  }
+
+  function renderFirmwareUpdate() {
+    const card = el('rc-firmware-update-card');
+    const button = el('rc-firmware-update');
+    if (!card || !button) return;
+    const ver = firmwareVersionOf(status);
+    setText('rc-firmware-current', rocketLink.connected ? (ver || 'Reading…') : 'Not connected');
+    setText('rc-firmware-available', firmwareAvailableVersion || 'Check for updates');
+    const defaultMessage = !rocketLink.connected
+      ? 'Connect the rocket computer over BLE to update it.'
+      : !rocketLink.otaSupported
+        ? 'This board needs one initial USB flash before Bluetooth OTA is available.'
+        : !safeForOta()
+          ? 'Stop recording and wait until idle before updating.'
+          : 'Firmware stays offline during install and restarts automatically.';
+    setText('rc-firmware-update-status', firmwareUpdateMessage || defaultMessage);
+    button.disabled = firmwareUpdateBusy || !rocketLink.connected || !rocketLink.otaSupported || !safeForOta();
+    button.textContent = firmwareUpdateBusy ? 'Updating…' : 'Check & Update RC';
+    const progress = el('rc-firmware-progress');
+    if (progress) progress.hidden = !firmwareUpdateBusy && firmwareProgressPercent === 0;
+    const fill = el('rc-firmware-progress-fill');
+    if (fill) fill.style.width = `${firmwareProgressPercent}%`;
+    card.classList.toggle('updating', firmwareUpdateBusy);
+    card.classList.toggle('error', firmwareUpdateTone === 'error');
+  }
+
+  function formatFirmwareBytes(bytes) {
+    return `${(Number(bytes) / 1024).toFixed(0)} KB`;
+  }
+
+  async function runFirmwareUpdate() {
+    if (firmwareUpdateBusy || !rocketLink.connected || !rocketLink.otaSupported) return;
+    if (!safeForOta()) {
+      firmwareUpdateMessage = 'Stop recording / countdown before updating the rocket computer.';
+      firmwareUpdateTone = 'error';
+      renderFirmwareUpdate();
+      return;
+    }
+    firmwareUpdateBusy = true;
+    firmwareUpdateTone = '';
+    firmwareProgressPercent = 0;
+    firmwareUpdateMessage = 'Checking rocket computer firmware release…';
+    renderFirmwareUpdate();
+    try {
+      const metadataResponse = await fetch('/api/rc-firmware/latest', { cache: 'no-store' });
+      const metadata = await metadataResponse.json().catch(() => ({}));
+      if (!metadataResponse.ok) throw new Error(metadata.error || `release lookup failed (${metadataResponse.status})`);
+      firmwareAvailableVersion = metadata.version;
+      renderFirmwareUpdate();
+      const current = firmwareVersionOf(status);
+      if (current && current === metadata.version) {
+        firmwareUpdateMessage = 'Rocket computer firmware is already up to date.';
+        firmwareProgressPercent = 100;
+        return;
+      }
+
+      firmwareUpdateMessage = `Downloading ${formatFirmwareBytes(metadata.size)}…`;
+      renderFirmwareUpdate();
+      const binaryResponse = await fetch(
+        `${metadata.downloadUrl}?sha256=${encodeURIComponent(metadata.sha256)}`,
+        { cache: 'no-store' }
+      );
+      if (!binaryResponse.ok) {
+        const detail = await binaryResponse.json().catch(() => ({}));
+        throw new Error(detail.error || `firmware download failed (${binaryResponse.status})`);
+      }
+      const firmware = new Uint8Array(await binaryResponse.arrayBuffer());
+      const digest = await crypto.subtle.digest('SHA-256', firmware);
+      const actualSha = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+      if (firmware.byteLength !== metadata.size || actualSha !== metadata.sha256) {
+        throw new Error('downloaded firmware failed integrity validation');
+      }
+
+      firmwareUpdateMessage = 'Starting Bluetooth installation…';
+      renderFirmwareUpdate();
+      const unsub = rocketLink.on('ota-status', st => {
+        const received = Number(st?.received) || 0;
+        const total = Number(st?.total) || 0;
+        if (total > 0) firmwareProgressPercent = Math.min(100, Math.round(received / total * 100));
+        if (st?.state === 'ready') firmwareUpdateMessage = 'Rocket ready — transferring…';
+        else if (st?.state === 'receiving') firmwareUpdateMessage = `Installing… ${firmwareProgressPercent}%`;
+        else if (st?.state === 'complete') firmwareUpdateMessage = 'Verified — restarting…';
+        renderFirmwareUpdate();
+      });
+      try {
+        await rocketLink.installFirmware(metadata, firmware);
+        await rocketLink.waitForFirmwareVersion(metadata.version);
+      } finally {
+        unsub?.();
+      }
+      firmwareProgressPercent = 100;
+      firmwareUpdateMessage = `Updated successfully to ${metadata.version}.`;
+      firmwareUpdateTone = 'success';
+    } catch (error) {
+      firmwareUpdateMessage = `Update failed: ${error?.message || error}`;
+      firmwareUpdateTone = 'error';
+    } finally {
+      firmwareUpdateBusy = false;
+      renderFirmwareUpdate();
+    }
   }
 
   async function connect() {
@@ -432,12 +551,14 @@
     on('rc-stop-rec', 'click', () => safe('stop_recording', () => sendCmd({ cmd: 'stop_recording' })));
     on('rc-abort', 'click', () => safe('abort', () => sendCmd({ cmd: 'abort', reason: 'ui' })));
     on('rc-ground-test', 'click', () => safe('ground_test', () => sendCmd({ cmd: 'ground_test', scenario: 'full_flight' })));
+    on('rc-firmware-update', 'click', () => runFirmwareUpdate());
 
     rocketLink.on('state', () => render());
     rocketLink.on('status', s => { status = s; lastErrorText = ''; render(); });
     rocketLink.on('telemetry', t => { telemetry = t; render(); });
     rocketLink.on('event', () => render());
     rocketLink.on('health', () => render());
+    rocketLink.on('ota-status', () => renderFirmwareUpdate());
 
     if (RocketBleLink.supported()) {
       rocketLink.restoreGranted().catch(() => {});

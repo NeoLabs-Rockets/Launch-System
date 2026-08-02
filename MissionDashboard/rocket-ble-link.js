@@ -12,11 +12,20 @@
   const STATUS_UUID = '9c4e0003-6a2b-4c8d-9e1f-1d6c7a0b2000';
   const TELEMETRY_UUID = '9c4e0004-6a2b-4c8d-9e1f-1d6c7a0b2000';
   const EVENT_UUID = '9c4e0005-6a2b-4c8d-9e1f-1d6c7a0b2000';
+  const FILE_DATA_UUID = '9c4e0006-6a2b-4c8d-9e1f-1d6c7a0b2000';
+  const OTA_CONTROL_UUID = '9c4e0007-6a2b-4c8d-9e1f-1d6c7a0b2000';
+  const OTA_DATA_UUID = '9c4e0008-6a2b-4c8d-9e1f-1d6c7a0b2000';
+  const OTA_STATUS_UUID = '9c4e0009-6a2b-4c8d-9e1f-1d6c7a0b2000';
 
   const CONNECT_TIMEOUT_MS = 10000;
   const WRITE_TIMEOUT_MS = 4000;
+  const FILE_CHUNK_TIMEOUT_MS = 8000;
   const PING_INTERVAL_MS = 2000;
   const STALE_DEAD_MS = 12000;
+  const FILE_CHUNK_MAX = 160;
+  const OTA_CHUNK_BYTES = 160;
+  const OTA_WINDOW_CHUNKS = 16;
+  const OTA_ACK_TIMEOUT_MS = 10000;
   const RECONNECT_DELAYS_MS = [300, 700, 1500, 3000, 6000, 10000];
   const MAX_RECONNECT_ATTEMPTS = 20;
   const NAME_KEY = 'neolabs.rocket.ble.deviceName';
@@ -51,11 +60,20 @@
       this.lastTelemetry = null;
       this.lastEvent = null;
       this.msgSeq = 1;
+      this.fileTransferSupported = false;
 
       this._command = null;
       this._statusChar = null;
       this._telemetryChar = null;
       this._eventChar = null;
+      this._fileDataChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this._otaStatus = null;
+      this._otaWaiters = new Set();
+      this._otaInProgress = false;
+      this._expectedOtaReboot = false;
       this._writeChain = Promise.resolve();
       this._writeFailures = 0;
       this._listeners = new Map();
@@ -66,10 +84,14 @@
       this._reconnectToken = 0;
       this._connectSeq = 0;
       this._wakeReconnect = null;
+      this._eventWaiters = new Set();
+      this._chunkWaiters = new Set();
       this._onGattDisconnected = () => this._handleDrop('gatt_disconnected');
       this._onStatusBound = event => this._onStatus(event);
       this._onTelemetryBound = event => this._onTelemetry(event);
       this._onEventBound = event => this._onEvent(event);
+      this._onFileDataBound = event => this._onFileData(event);
+      this._onOtaNotifyBound = event => this._onOtaNotify(event);
 
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && this.state === 'reconnecting') this.retryNow();
@@ -88,6 +110,14 @@
 
     get deviceName() {
       return this.device?.name || this.lastKnownName || '';
+    }
+
+    get otaSupported() {
+      return !!(this._otaControl && this._otaData && this._otaStatusChar);
+    }
+
+    get otaInProgress() {
+      return this._otaInProgress || this._expectedOtaReboot;
     }
 
     on(event, fn) {
@@ -164,12 +194,28 @@
       const statusChar = await withTimeout(service.getCharacteristic(STATUS_UUID), CONNECT_TIMEOUT_MS, 'Rocket status');
       let telemetryChar = null;
       let eventChar = null;
+      let fileDataChar = null;
       try {
         telemetryChar = await service.getCharacteristic(TELEMETRY_UUID);
       } catch (_) {}
       try {
         eventChar = await service.getCharacteristic(EVENT_UUID);
       } catch (_) {}
+      try {
+        fileDataChar = await service.getCharacteristic(FILE_DATA_UUID);
+      } catch (_) {}
+      let otaControl = null;
+      let otaData = null;
+      let otaStatusChar = null;
+      try {
+        [otaControl, otaData, otaStatusChar] = await Promise.all([
+          service.getCharacteristic(OTA_CONTROL_UUID),
+          service.getCharacteristic(OTA_DATA_UUID),
+          service.getCharacteristic(OTA_STATUS_UUID)
+        ]);
+      } catch (_) {
+        // Older firmware without OTA remains usable.
+      }
       if (seq !== this._connectSeq) throw new Error('connection attempt superseded');
 
       statusChar.removeEventListener('characteristicvaluechanged', this._onStatusBound);
@@ -186,16 +232,37 @@
         eventChar.addEventListener('characteristicvaluechanged', this._onEventBound);
         await withTimeout(eventChar.startNotifications(), CONNECT_TIMEOUT_MS, 'Rocket event notify');
       }
+      if (fileDataChar) {
+        fileDataChar.removeEventListener('characteristicvaluechanged', this._onFileDataBound);
+        fileDataChar.addEventListener('characteristicvaluechanged', this._onFileDataBound);
+        await withTimeout(fileDataChar.startNotifications(), CONNECT_TIMEOUT_MS, 'Rocket file data notify');
+      }
+      if (otaStatusChar) {
+        otaStatusChar.removeEventListener('characteristicvaluechanged', this._onOtaNotifyBound);
+        otaStatusChar.addEventListener('characteristicvaluechanged', this._onOtaNotifyBound);
+        await withTimeout(otaStatusChar.startNotifications(), CONNECT_TIMEOUT_MS, 'Rocket OTA notifications');
+      }
       if (seq !== this._connectSeq) throw new Error('connection attempt superseded');
 
       this._command = command;
       this._statusChar = statusChar;
       this._telemetryChar = telemetryChar;
       this._eventChar = eventChar;
+      this._fileDataChar = fileDataChar;
+      this._otaControl = otaControl;
+      this._otaData = otaData;
+      this._otaStatusChar = otaStatusChar;
+      this._otaStatus = null;
+      this.fileTransferSupported = !!fileDataChar;
       this._writeChain = Promise.resolve();
       this._writeFailures = 0;
       this.lastActivityAt = Date.now();
-      this._setState('connected', { deviceName: this.deviceName });
+      this._setState('connected', {
+        deviceName: this.deviceName,
+        fileTransfer: this.fileTransferSupported,
+        ota: this.otaSupported,
+        otaReconnected: this._expectedOtaReboot
+      });
       this._startPing();
       this._startWatchdog();
       // Time sync + status
@@ -212,8 +279,16 @@
       this._statusChar = null;
       this._telemetryChar = null;
       this._eventChar = null;
+      this._fileDataChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this._rejectEventWaiters(new Error('BLE disconnected'));
+      this._rejectChunkWaiters(new Error('BLE disconnected'));
+      this._rejectOtaWaiters(new Error(this._expectedOtaReboot ? 'Controller restarting' : 'BLE disconnected during update'));
       try { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); } catch (_) {}
-      this._setState('reconnecting', { reason, attempt: 0, nextRetryMs: RECONNECT_DELAYS_MS[0] });
+      const dropReason = this._expectedOtaReboot ? 'ota_reboot' : reason;
+      this._setState('reconnecting', { reason: dropReason, attempt: 0, nextRetryMs: RECONNECT_DELAYS_MS[0] });
       this._reconnectLoop();
     }
 
@@ -258,6 +333,7 @@
 
     disconnect() {
       this._intentional = true;
+      this._expectedOtaReboot = false;
       this._cancelReconnect();
       this._connectSeq++;
       this._teardown();
@@ -278,6 +354,14 @@
       this._statusChar = null;
       this._telemetryChar = null;
       this._eventChar = null;
+      this._fileDataChar = null;
+      this._otaControl = null;
+      this._otaData = null;
+      this._otaStatusChar = null;
+      this.fileTransferSupported = false;
+      this._rejectEventWaiters(new Error('BLE disconnected'));
+      this._rejectChunkWaiters(new Error('BLE disconnected'));
+      this._rejectOtaWaiters(new Error('BLE disconnected'));
     }
 
     send(payload) {
@@ -300,6 +384,7 @@
             'Rocket BLE write'
           );
           this._writeFailures = 0;
+          this.lastActivityAt = Date.now();
         } catch (error) {
           this._writeFailures++;
           const gattUp = !!this.device?.gatt?.connected;
@@ -313,12 +398,236 @@
       return run;
     }
 
+    /** Wait for next event/status JSON matching predicate. */
+    waitForEvent(predicate, timeoutMs = FILE_CHUNK_TIMEOUT_MS) {
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          this._eventWaiters.delete(waiter);
+          reject(new Error('Rocket event timed out'));
+        }, timeoutMs);
+        this._eventWaiters.add(waiter);
+      });
+    }
+
+    _rejectEventWaiters(error) {
+      for (const w of this._eventWaiters) {
+        clearTimeout(w.timer);
+        w.reject(error);
+      }
+      this._eventWaiters.clear();
+    }
+
+    _rejectChunkWaiters(error) {
+      for (const w of this._chunkWaiters) {
+        clearTimeout(w.timer);
+        w.reject(error);
+      }
+      this._chunkWaiters.clear();
+    }
+
+    waitForChunk(expectedOffset, timeoutMs = FILE_CHUNK_TIMEOUT_MS) {
+      return new Promise((resolve, reject) => {
+        const waiter = { expectedOffset, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          this._chunkWaiters.delete(waiter);
+          reject(new Error(`File chunk timeout at offset ${expectedOffset}`));
+        }, timeoutMs);
+        this._chunkWaiters.add(waiter);
+      });
+    }
+
+    async listFlights() {
+      const pending = this.waitForEvent(p => p?.cmd === 'list_flights' && Array.isArray(p.flights));
+      await this.send({ cmd: 'list_flights' });
+      const msg = await pending;
+      return msg.flights || [];
+    }
+
+    async listFiles(flight) {
+      const pending = this.waitForEvent(p => p?.cmd === 'list_files' && p.flight === flight);
+      await this.send({ cmd: 'list_files', flight });
+      const msg = await pending;
+      return msg.files || [];
+    }
+
+    async downloadFile(flight, fileName, onProgress) {
+      if (!this.fileTransferSupported) {
+        throw new Error('This rocket firmware does not support file transfer — flash an updated build');
+      }
+      const beginPending = this.waitForEvent(p => p?.cmd === 'file_begin' && p.file === fileName);
+      await this.send({ cmd: 'file_begin', flight, file: fileName });
+      const begin = await beginPending;
+      if (begin.result !== 'ACK') throw new Error(begin.detail || 'file_begin failed');
+      const total = Number(begin.size) || 0;
+      const chunkMax = Number(begin.chunk) || FILE_CHUNK_MAX;
+      const parts = [];
+      let offset = 0;
+      while (offset < total) {
+        const want = Math.min(chunkMax, total - offset);
+        const chunkPromise = this.waitForChunk(offset);
+        await this.send({ cmd: 'file_read', offset, len: want, total });
+        const chunk = await chunkPromise;
+        parts.push(chunk.data);
+        offset += chunk.len;
+        if (typeof onProgress === 'function') onProgress({ offset, total, file: fileName });
+        if (chunk.len === 0) break;
+      }
+      await this.send({ cmd: 'file_close' }).catch(() => {});
+      // Merge Uint8Arrays
+      const out = new Uint8Array(offset);
+      let pos = 0;
+      for (const p of parts) {
+        out.set(p, pos);
+        pos += p.length;
+      }
+      return out;
+    }
+
+    async deleteFlight(flight) {
+      const pending = this.waitForEvent(
+        p => p?.cmd === 'delete_flight' || p?.detail === 'deleted' || p?.detail === 'delete_failed',
+        6000
+      );
+      await this.send({ cmd: 'delete_flight', flight });
+      const res = await pending;
+      if (res.result === 'NACK' || res.result === 'REJECTED') {
+        throw new Error(res.detail || 'delete failed');
+      }
+      return res;
+    }
+
+    /* ── OTA (mirrors Launch Controller NeoBleLink.installFirmware) ───── */
+
+    async installFirmware(manifest, firmwareBytes) {
+      if (this.state !== 'connected') throw new Error('Rocket BLE not connected');
+      if (!this.otaSupported) throw new Error('Rocket computer requires a one-time USB firmware update');
+      if (this._otaInProgress) throw new Error('Firmware update already in progress');
+      const bytes = firmwareBytes instanceof Uint8Array ? firmwareBytes : new Uint8Array(firmwareBytes);
+      if (!manifest || bytes.byteLength !== manifest.size) throw new Error('Firmware size does not match manifest');
+
+      this._otaInProgress = true;
+      this._otaStatus = null;
+      this._stopPing();
+      try {
+        await this._writeOtaControl({
+          cmd: 'begin',
+          size: manifest.size,
+          sha256: manifest.sha256,
+          version: manifest.version
+        });
+        await this._waitForOtaStatus(status => status.state === 'ready' || status.state === 'error');
+        this._throwForOtaError();
+
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const windowEnd = Math.min(bytes.byteLength, offset + OTA_CHUNK_BYTES * OTA_WINDOW_CHUNKS);
+          while (offset < windowEnd) {
+            const payloadEnd = Math.min(bytes.byteLength, offset + OTA_CHUNK_BYTES);
+            const packet = new Uint8Array(4 + payloadEnd - offset);
+            new DataView(packet.buffer).setUint32(0, offset, true);
+            packet.set(bytes.subarray(offset, payloadEnd), 4);
+            const write = this._otaData.writeValueWithoutResponse
+              ? this._otaData.writeValueWithoutResponse(packet)
+              : this._otaData.writeValueWithResponse(packet);
+            await withTimeout(write, WRITE_TIMEOUT_MS, 'Rocket OTA data write');
+            offset = payloadEnd;
+          }
+          await this._writeOtaControl({ cmd: 'status' });
+          await this._waitForOtaStatus(status => status.state === 'error' || Number(status.received) >= offset);
+          this._throwForOtaError();
+        }
+
+        this._expectedOtaReboot = true;
+        await this._writeOtaControl({ cmd: 'finish' });
+        await this._waitForOtaStatus(status => status.state === 'complete' || status.state === 'error');
+        this._throwForOtaError();
+        return this._otaStatus;
+      } catch (error) {
+        this._expectedOtaReboot = false;
+        try { await this._writeOtaControl({ cmd: 'abort' }); } catch (_) {}
+        throw error;
+      } finally {
+        this._otaInProgress = false;
+        this._startPing();
+      }
+    }
+
+    waitForFirmwareVersion(version, timeoutMs = 60000) {
+      return new Promise((resolve, reject) => {
+        let unsubscribe = () => {};
+        const timer = setTimeout(() => {
+          unsubscribe();
+          this._expectedOtaReboot = false;
+          reject(new Error('Rocket computer did not reconnect with the new firmware'));
+        }, timeoutMs);
+        unsubscribe = this.on('status', status => {
+          const ver = status?.ver || status?.v;
+          if (ver !== version) return;
+          clearTimeout(timer);
+          unsubscribe();
+          this._expectedOtaReboot = false;
+          resolve(status);
+        });
+        if (this.state === 'connected') this.send({ cmd: 'status' }).catch(() => {});
+      });
+    }
+
+    _writeOtaControl(payload) {
+      if (this.state !== 'connected' || !this._otaControl) {
+        return Promise.reject(new Error('OTA control unavailable'));
+      }
+      const body = new TextEncoder().encode(JSON.stringify(payload));
+      return withTimeout(this._otaControl.writeValueWithResponse(body), WRITE_TIMEOUT_MS, 'Rocket OTA control');
+    }
+
+    _waitForOtaStatus(predicate) {
+      if (this._otaStatus && predicate(this._otaStatus)) return Promise.resolve(this._otaStatus);
+      return new Promise((resolve, reject) => {
+        const waiter = { predicate, resolve, reject, timer: null };
+        waiter.timer = setTimeout(() => {
+          this._otaWaiters.delete(waiter);
+          reject(new Error('OTA acknowledgement timed out'));
+        }, OTA_ACK_TIMEOUT_MS);
+        this._otaWaiters.add(waiter);
+      });
+    }
+
+    _throwForOtaError() {
+      if (this._otaStatus?.state === 'error') {
+        throw new Error(this._otaStatus.error || 'Rocket computer rejected firmware update');
+      }
+    }
+
+    _rejectOtaWaiters(error) {
+      for (const waiter of this._otaWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+      this._otaWaiters.clear();
+    }
+
+    _onOtaNotify(event) {
+      let parsed;
+      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      this.lastActivityAt = Date.now();
+      this._otaStatus = parsed;
+      this._emit('ota-status', parsed);
+      for (const waiter of [...this._otaWaiters]) {
+        if (!waiter.predicate(parsed)) continue;
+        clearTimeout(waiter.timer);
+        this._otaWaiters.delete(waiter);
+        waiter.resolve(parsed);
+      }
+    }
+
     _onStatus(event) {
       let parsed;
       try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
       this.lastActivityAt = Date.now();
       this.lastStatus = parsed;
       this._emit('status', parsed);
+      this._resolveEventWaiters(parsed);
     }
 
     _onTelemetry(event) {
@@ -331,22 +640,48 @@
 
     _onEvent(event) {
       let parsed;
-      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) {
-        // May be command ACK string
-        try {
-          const text = new TextDecoder().decode(event.target.value);
-          parsed = JSON.parse(text);
-        } catch (_) { return; }
-      }
+      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
       this.lastActivityAt = Date.now();
       this.lastEvent = parsed;
       this._emit('event', parsed);
+      this._resolveEventWaiters(parsed);
+    }
+
+    _resolveEventWaiters(parsed) {
+      for (const w of [...this._eventWaiters]) {
+        try {
+          if (!w.predicate(parsed)) continue;
+        } catch (_) { continue; }
+        clearTimeout(w.timer);
+        this._eventWaiters.delete(w);
+        w.resolve(parsed);
+      }
+    }
+
+    _onFileData(event) {
+      const value = event.target.value; // DataView
+      if (!value || value.byteLength < 10) return;
+      const offset = value.getUint32(0, true);
+      const total = value.getUint32(4, true);
+      const len = value.getUint16(8, true);
+      const data = new Uint8Array(value.buffer, value.byteOffset + 10, len);
+      this.lastActivityAt = Date.now();
+      const chunk = { offset, total, len, data: new Uint8Array(data) };
+      this._emit('file-chunk', chunk);
+      for (const w of [...this._chunkWaiters]) {
+        if (w.expectedOffset !== offset) continue;
+        clearTimeout(w.timer);
+        this._chunkWaiters.delete(w);
+        w.resolve(chunk);
+      }
     }
 
     _startPing() {
       this._stopPing();
       this._pingTimer = setInterval(() => {
         if (this.state !== 'connected') return;
+        // Pause pings during heavy file transfer waiters
+        if (this._chunkWaiters.size > 0) return;
         this.send({ cmd: 'ping' }).catch(() => {});
       }, PING_INTERVAL_MS);
     }
@@ -362,8 +697,8 @@
         if (this.state !== 'connected') return;
         const staleMs = Date.now() - this.lastActivityAt;
         this._emit('health', { staleMs });
-        // After liftoff, RF loss is expected — still mark reconnecting but UI
-        // should treat it as normal (handled by rocket-computer.js).
+        // Don't drop during active file transfer
+        if (this._chunkWaiters.size > 0 || this._eventWaiters.size > 0) return;
         if (staleMs > STALE_DEAD_MS) this._handleDrop('stale');
       }, 1000);
     }

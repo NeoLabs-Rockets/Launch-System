@@ -7,9 +7,20 @@
 (function () {
   'use strict';
 
-  const VIEWS = ['dashboard', 'finder', 'camera'];
-  const PATH_TO_VIEW = { '/finder.html': 'finder', '/camera.html': 'camera', '/': 'dashboard', '/index.html': 'dashboard' };
-  const VIEW_TO_PATH = { dashboard: '/', finder: '/finder.html', camera: '/camera.html' };
+  const VIEWS = ['dashboard', 'finder', 'camera', 'rcdata'];
+  const PATH_TO_VIEW = {
+    '/finder.html': 'finder',
+    '/camera.html': 'camera',
+    '/rc-data.html': 'rcdata',
+    '/': 'dashboard',
+    '/index.html': 'dashboard'
+  };
+  const VIEW_TO_PATH = {
+    dashboard: '/',
+    finder: '/finder.html',
+    camera: '/camera.html',
+    rcdata: '/rc-data.html'
+  };
 
   function viewFromLocation() {
     if (location.hash) {
@@ -48,6 +59,7 @@
     if (prev === 'camera' && window.CameraApp?.onHide) window.CameraApp.onHide();
     if (view === 'finder' && window.FinderApp?.onShow) window.FinderApp.onShow();
     if (view === 'camera' && window.CameraApp?.onShow) window.CameraApp.onShow();
+    if (view === 'rcdata' && window.NeoRcData?.onShow) window.NeoRcData.onShow();
 
     window.scrollTo(0, 0);
   }

@@ -33,9 +33,15 @@ const AIRCRAFT_STALE_TTL_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = [200, 600, 1200];
 const FIRMWARE_GITHUB_REPOSITORY = process.env.FIRMWARE_GITHUB_REPOSITORY || 'NeoLabs-Rockets/Launch-System';
 const FIRMWARE_RELEASE_TAG = process.env.FIRMWARE_RELEASE_TAG || 'firmware-latest';
+// Rocket computer (XIAO ESP32-S3 Sense) rolling release — typically NL-1-Pioneer repo.
+const RC_FIRMWARE_GITHUB_REPOSITORY = process.env.RC_FIRMWARE_GITHUB_REPOSITORY
+  || process.env.FIRMWARE_GITHUB_REPOSITORY_RC
+  || 'NeoLabs-Rockets/NL-1-Pioneer';
+const RC_FIRMWARE_RELEASE_TAG = process.env.RC_FIRMWARE_RELEASE_TAG || 'rc-firmware-latest';
 const FIRMWARE_RELEASE_CACHE_TTL_MS = 60 * 1000;
 const FIRMWARE_BINARY_CACHE_TTL_MS = 5 * 60 * 1000;
-const MAX_FIRMWARE_BYTES = 0x140000;
+const MAX_FIRMWARE_BYTES = 0x140000;           // launch controller OTA slot
+const MAX_RC_FIRMWARE_BYTES = 0x330000;        // XIAO Sense default_8MB app slot
 const OVERPASS_CACHE_TTL_MS = 15 * 60 * 1000;
 const OVERPASS_STALE_TTL_MS = 60 * 60 * 1000;
 const OVERPASS_ENDPOINTS = [
@@ -53,6 +59,8 @@ const authFailures = new Map();
 let cachePersistTimer = null;
 let firmwareReleaseCache = null;
 let firmwareBinaryCache = null;
+let rcFirmwareReleaseCache = null;
+let rcFirmwareBinaryCache = null;
 
 // SSE clients for cross-device launch event relay
 const sseClients = new Map();
@@ -202,14 +210,16 @@ function scheduleCachePersist() {
   cachePersistTimer.unref();
 }
 
-function validateFirmwareManifest(value) {
+function validateFirmwareManifest(value, { environment, maxBytes } = {}) {
+  const expectedEnv = environment || 'esp32dev';
+  const maxSize = maxBytes || MAX_FIRMWARE_BYTES;
   if (!value || value.schemaVersion !== 1) throw new Error('unsupported_manifest_schema');
   if (typeof value.version !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,62}$/.test(value.version)) {
     throw new Error('invalid_firmware_version');
   }
   if (typeof value.commit !== 'string' || !/^[0-9a-f]{40}$/.test(value.commit)) throw new Error('invalid_firmware_commit');
-  if (value.environment !== 'esp32dev') throw new Error('wrong_firmware_environment');
-  if (!Number.isSafeInteger(value.size) || value.size <= 0 || value.size > MAX_FIRMWARE_BYTES) {
+  if (value.environment !== expectedEnv) throw new Error('wrong_firmware_environment');
+  if (!Number.isSafeInteger(value.size) || value.size <= 0 || value.size > maxSize) {
     throw new Error('invalid_firmware_size');
   }
   if (typeof value.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.sha256)) throw new Error('invalid_firmware_sha256');
@@ -225,7 +235,8 @@ function validateFirmwareManifest(value) {
     size: value.size,
     sha256: value.sha256,
     asset: value.asset,
-    publishedAt: value.publishedAt
+    publishedAt: value.publishedAt,
+    target: value.target || null
   };
 }
 
@@ -254,7 +265,10 @@ async function latestFirmwareRelease(force = false) {
   const manifestAsset = release.assets?.find(asset => asset.name === 'manifest.json');
   const binaryAsset = release.assets?.find(asset => asset.name === 'firmware.bin');
   if (!manifestAsset?.browser_download_url || !binaryAsset?.browser_download_url) throw new Error('firmware_release_assets_missing');
-  const manifest = validateFirmwareManifest(await githubFirmwareFetch(manifestAsset.browser_download_url));
+  const manifest = validateFirmwareManifest(await githubFirmwareFetch(manifestAsset.browser_download_url), {
+    environment: 'esp32dev',
+    maxBytes: MAX_FIRMWARE_BYTES
+  });
   if (Number(binaryAsset.size) !== manifest.size) throw new Error('firmware_release_size_mismatch');
   firmwareReleaseCache = {
     manifest,
@@ -276,6 +290,47 @@ async function latestFirmwareBinary(expectedSha) {
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
   if (sha256 !== release.manifest.sha256) throw new Error('firmware_binary_sha_mismatch');
   firmwareBinaryCache = { sha256, buffer, expiresAt: Date.now() + FIRMWARE_BINARY_CACHE_TTL_MS };
+  return { manifest: release.manifest, buffer };
+}
+
+async function latestRcFirmwareRelease(force = false) {
+  if (!force && rcFirmwareReleaseCache?.expiresAt > Date.now()) return rcFirmwareReleaseCache;
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(RC_FIRMWARE_GITHUB_REPOSITORY)) {
+    throw new Error('invalid_rc_firmware_repository_configuration');
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(RC_FIRMWARE_RELEASE_TAG)) throw new Error('invalid_rc_firmware_tag_configuration');
+  const releaseUrl = `https://api.github.com/repos/${RC_FIRMWARE_GITHUB_REPOSITORY}/releases/tags/${encodeURIComponent(RC_FIRMWARE_RELEASE_TAG)}`;
+  const release = await githubFirmwareFetch(releaseUrl);
+  const manifestAsset = release.assets?.find(asset => asset.name === 'manifest.json');
+  const binaryAsset = release.assets?.find(asset => asset.name === 'firmware.bin');
+  if (!manifestAsset?.browser_download_url || !binaryAsset?.browser_download_url) throw new Error('rc_firmware_release_assets_missing');
+  const manifest = validateFirmwareManifest(await githubFirmwareFetch(manifestAsset.browser_download_url), {
+    environment: 'xiao_esp32s3_sense',
+    maxBytes: MAX_RC_FIRMWARE_BYTES
+  });
+  if (Number(binaryAsset.size) !== manifest.size) throw new Error('rc_firmware_release_size_mismatch');
+  rcFirmwareReleaseCache = {
+    manifest,
+    binaryUrl: binaryAsset.browser_download_url,
+    expiresAt: Date.now() + FIRMWARE_RELEASE_CACHE_TTL_MS
+  };
+  if (rcFirmwareBinaryCache?.sha256 !== manifest.sha256) rcFirmwareBinaryCache = null;
+  return rcFirmwareReleaseCache;
+}
+
+async function latestRcFirmwareBinary(expectedSha) {
+  const release = await latestRcFirmwareRelease();
+  if (expectedSha && expectedSha !== release.manifest.sha256) throw new Error('firmware_release_changed');
+  if (rcFirmwareBinaryCache?.sha256 === release.manifest.sha256 && rcFirmwareBinaryCache.expiresAt > Date.now()) {
+    return { manifest: release.manifest, buffer: rcFirmwareBinaryCache.buffer };
+  }
+  const buffer = await githubFirmwareFetch(release.binaryUrl, 'buffer');
+  if (buffer.length !== release.manifest.size || buffer.length > MAX_RC_FIRMWARE_BYTES) {
+    throw new Error('firmware_binary_size_mismatch');
+  }
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  if (sha256 !== release.manifest.sha256) throw new Error('firmware_binary_sha_mismatch');
+  rcFirmwareBinaryCache = { sha256, buffer, expiresAt: Date.now() + FIRMWARE_BINARY_CACHE_TTL_MS };
   return { manifest: release.manifest, buffer };
 }
 
@@ -455,6 +510,37 @@ app.get('/api/firmware/latest.bin', async (req, res) => {
     res.status(changed ? 409 : 502).json({ error: error.message });
   }
 });
+
+app.get('/api/rc-firmware/latest', async (req, res) => {
+  try {
+    const { manifest } = await latestRcFirmwareRelease();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ...manifest, downloadUrl: '/api/rc-firmware/latest.bin', target: 'rocket-computer' });
+  } catch (error) {
+    console.warn('[rc-firmware] release lookup failed:', error.message);
+    const unavailable = /^github_(404|403)$/.test(error.message);
+    res.status(unavailable ? 503 : 502).json({ error: error.message });
+  }
+});
+
+app.get('/api/rc-firmware/latest.bin', async (req, res) => {
+  const expectedSha = String(req.query.sha256 || '');
+  if (!/^[0-9a-f]{64}$/.test(expectedSha)) return res.status(400).json({ error: 'valid_sha256_required' });
+  try {
+    const { manifest, buffer } = await latestRcFirmwareBinary(expectedSha);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Firmware-Version', manifest.version);
+    res.setHeader('X-Firmware-SHA256', manifest.sha256);
+    res.send(buffer);
+  } catch (error) {
+    console.warn('[rc-firmware] binary download failed:', error.message);
+    const changed = error.message === 'firmware_release_changed';
+    res.status(changed ? 409 : 502).json({ error: error.message });
+  }
+});
+
 app.use('/api', requireAuth);
 
 // ── Resilient camera recording cache ──────────────────────────────────────
