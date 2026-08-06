@@ -621,9 +621,46 @@
       }
     }
 
+    /*
+      Decode one notification. Silently swallowing a parse failure here hides
+      real faults: an oversized firmware payload is truncated at (ATT MTU - 3)
+      bytes on the wire, so every update fails to parse and the UI just shows
+      stale/empty fields with no indication anything is wrong. Report instead.
+    */
+    _parseNotification(event, kind) {
+      const raw = new TextDecoder().decode(event.target.value);
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        const counts = this._parseFailures || (this._parseFailures = {});
+        counts[kind] = (counts[kind] || 0) + 1;
+        // Unterminated JSON that starts valid is the signature of MTU truncation.
+        const truncated = raw.startsWith('{') && !raw.trimEnd().endsWith('}');
+        this.lastParseError = {
+          kind,
+          bytes: raw.length,
+          truncated,
+          at: Date.now(),
+          sample: raw.slice(0, 120)
+        };
+        if (counts[kind] === 1 || counts[kind] % 50 === 0) {
+          console.error(
+            `[rocket-ble] ${kind} notification failed to parse (${counts[kind]}x, ${raw.length} B)`
+            + (truncated
+              ? ' — payload looks TRUNCATED: the firmware is sending more than the'
+                + ' negotiated ATT MTU allows. Shrink the payload or raise BLE_MTU_TARGET.'
+              : ''),
+            raw.slice(0, 120)
+          );
+        }
+        this._emit('parseerror', this.lastParseError);
+        return null;
+      }
+    }
+
     _onStatus(event) {
-      let parsed;
-      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      const parsed = this._parseNotification(event, 'status');
+      if (!parsed) return;
       this.lastActivityAt = Date.now();
       this.lastStatus = parsed;
       this._emit('status', parsed);
@@ -631,16 +668,16 @@
     }
 
     _onTelemetry(event) {
-      let parsed;
-      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      const parsed = this._parseNotification(event, 'telemetry');
+      if (!parsed) return;
       this.lastActivityAt = Date.now();
       this.lastTelemetry = parsed;
       this._emit('telemetry', parsed);
     }
 
     _onEvent(event) {
-      let parsed;
-      try { parsed = JSON.parse(new TextDecoder().decode(event.target.value)); } catch (_) { return; }
+      const parsed = this._parseNotification(event, 'event');
+      if (!parsed) return;
       this.lastActivityAt = Date.now();
       this.lastEvent = parsed;
       this._emit('event', parsed);

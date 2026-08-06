@@ -66,8 +66,20 @@
     return 'Skip OK';
   }
 
+  // True once a parseable status has actually arrived. Absence of status is
+  // "unknown", never "faulty" — see updateLaunchConsole().
+  function statusKnown() {
+    return !!status && status.sd != null;
+  }
+
   function healthSummary(s) {
     if (!rocketLink.connected) return 'Not linked';
+    if (!statusKnown()) {
+      const pe = rocketLink.lastParseError;
+      return pe && pe.truncated
+        ? 'Status truncated by BLE MTU — state unknown'
+        : 'Waiting for first status update';
+    }
     const parts = [];
     parts.push(sdLabel(s.sd));
     parts.push(camLabel(s.cam));
@@ -173,23 +185,32 @@
     }
 
     // Checklist rocket readiness row — advisory only, never blocks arming
+    // A status we never received is NOT evidence of a hardware fault. Showing
+    // a red "check SD / camera" when the card is actually mounted trains crews
+    // to ignore the row — the failure mode this checklist exists to prevent.
+    // Unknown gets its own neutral state, distinct from a real fault.
+    const known = statusKnown();
     const check = el('lc-rocket-check');
     if (check) {
-      check.classList.toggle('continuity-ok', rocketLink.connected && recorderReady(s));
+      check.classList.toggle('continuity-ok', rocketLink.connected && known && recorderReady(s));
       check.classList.toggle('continuity-bypassed', !rocketLink.connected);
-      check.classList.toggle('continuity-unknown', false);
-      check.classList.toggle('continuity-bad', rocketLink.connected && !recorderReady(s));
+      check.classList.toggle('continuity-unknown', rocketLink.connected && !known);
+      check.classList.toggle('continuity-bad', rocketLink.connected && known && !recorderReady(s));
     }
     setText('lc-rocket-title', !rocketLink.connected
       ? 'Rocket computer not linked — not required'
-      : recorderReady(s)
-        ? 'Rocket computer ready'
-        : 'Rocket computer linked — check SD / camera');
+      : !known
+        ? 'Rocket computer linked — status unavailable'
+        : recorderReady(s)
+          ? 'Rocket computer ready'
+          : 'Rocket computer linked — check SD / camera');
     setText('lc-rocket-detail', !rocketLink.connected
       ? 'Highly recommended when the rocket has onboard compute. Safe to skip for bare airframes. Does not block arming or countdown.'
-      : recorderReady(s)
-        ? 'microSD and camera ready. Arming the controller will start recording.'
-        : healthSummary(s));
+      : !known
+        ? healthSummary(s)
+        : recorderReady(s)
+          ? 'microSD and camera ready. Arming the controller will start recording.'
+          : healthSummary(s));
 
     // Countdown step dual status
     setText('lc-cd-rc', !rocketLink.connected
