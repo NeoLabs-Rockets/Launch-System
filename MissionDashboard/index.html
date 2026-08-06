@@ -44,7 +44,7 @@
       <a href="/" data-view="dashboard" class="active">Dashboard</a>
       <a href="/finder.html" data-view="finder">Location Finder</a>
       <a href="/camera.html" data-view="camera">Camera</a>
-      <a href="/rc-data.html" data-view="rcdata">RC Data</a>
+      <a href="/rc-data.html" data-view="rcdata">Flight Viewer</a>
     </nav>
     <button class="hdr-launch" id="hdr-launch" type="button">▲ Launch Console</button>
     <div class="hdr-dot"></div>
@@ -571,46 +571,98 @@
   </section>
 </section>
 
-<!-- ══════════════════════════════ RC DATA ══════════════════════════════ -->
+<!-- ══════════════════════════════ FLIGHT VIEWER ══════════════════════════════ -->
 <section class="view rc-data-page" id="view-rcdata">
   <div class="rcd-hero">
     <div>
       <div class="lbl">Rocket Computer</div>
-      <h1>Flight Data</h1>
-      <p>Download telemetry and video from the onboard microSD over Bluetooth. Files are packed into a ZIP on this computer. After download you can delete the flight on the rocket computer.</p>
+      <h1>Flight Viewer</h1>
+      <p>Pull the flight folder straight off the microSD card — zip it, or point at the folder directly — and everything renders here: video, telemetry, and events, all in this browser. Nothing is uploaded anywhere.</p>
     </div>
   </div>
 
-  <div class="rcd-layout">
-    <aside class="card rcd-side">
-      <div class="lbl">Connection</div>
-      <div class="rcd-kv"><span>Link</span><strong id="rcd-link">Not connected</strong></div>
-      <div class="rcd-kv"><span>File transfer</span><strong id="rcd-xfer">—</strong></div>
-      <div class="rcd-actions">
-        <button class="sp-save" id="rcd-connect" type="button">Connect rocket computer</button>
-        <button class="sp-secondary" id="rcd-disconnect" type="button" disabled>Disconnect</button>
-        <button class="sp-secondary" id="rcd-refresh" type="button" disabled>Refresh flights</button>
-      </div>
-      <div class="finder-note">Uses the same BLE link as Mission Control. Stop recording before download. Large videos transfer slowly over BLE.</div>
-    </aside>
+  <div class="fv-drop" id="fv-drop" tabindex="0" role="button" aria-label="Load a flight recording">
+    <input type="file" id="fv-file-zip" accept=".zip" hidden>
+    <input type="file" id="fv-file-dir" webkitdirectory directory multiple hidden>
+    <div class="fv-drop-icon" aria-hidden="true">⤓</div>
+    <div class="fv-drop-title">Drop a flight ZIP here, or click to choose</div>
+    <div class="fv-drop-sub">Expects video.mjpg, telemetry.bin, events.jsonl, metadata.json — from <code>/flights/&lt;name&gt;</code> on the card</div>
+    <div class="fv-drop-actions">
+      <button class="sp-secondary" id="fv-pick-zip" type="button">Choose ZIP…</button>
+      <button class="sp-secondary" id="fv-pick-dir" type="button">Choose folder…</button>
+    </div>
+    <div class="fv-drop-status" id="fv-drop-status"></div>
+    <div class="fv-choose-list" id="fv-choose-list" hidden></div>
+  </div>
 
-    <section class="card rcd-main">
+  <section class="fv-app" id="fv-app" hidden>
+    <div class="card fv-summary" id="fv-summary"></div>
+
+    <div class="fv-main">
+      <div class="card fv-player">
+        <div class="fv-canvas-wrap">
+          <canvas id="fv-canvas" width="640" height="480"></canvas>
+          <div class="fv-hud" id="fv-hud" hidden></div>
+          <div class="fv-canvas-empty" id="fv-canvas-empty">No video in this flight</div>
+        </div>
+        <div class="fv-transport">
+          <button class="fv-btn" id="fv-step-back" type="button" title="Previous frame">⏮</button>
+          <button class="fv-btn fv-play" id="fv-play" type="button" title="Play / pause">▶</button>
+          <button class="fv-btn" id="fv-step-fwd" type="button" title="Next frame">⏭</button>
+          <span class="fv-time" id="fv-time">0:00.00 / 0:00.00</span>
+          <select class="fv-rate" id="fv-rate" title="Playback speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+          <label class="fv-hud-toggle"><input type="checkbox" id="fv-hud-toggle" checked> HUD</label>
+          <label class="fv-hud-toggle"><input type="checkbox" id="fv-overlay-toggle"> Broadcast overlay</label>
+        </div>
+        <div class="fv-scrub" id="fv-scrub">
+          <div class="fv-scrub-track">
+            <div class="fv-scrub-fill" id="fv-scrub-fill"></div>
+            <div class="fv-scrub-events" id="fv-scrub-events"></div>
+            <div class="fv-scrub-playhead" id="fv-scrub-playhead"></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="card fv-events">
+        <div class="lbl">Events</div>
+        <div class="fv-event-list" id="fv-event-list"></div>
+      </aside>
+    </div>
+
+    <div class="card fv-charts" id="fv-charts"></div>
+
+    <div class="card fv-export">
       <div class="card-head">
         <div>
-          <div class="lbl">Flights on microSD</div>
-          <div class="launch-link-state" id="rcd-status">Connect to browse flights.</div>
+          <div class="lbl">Export</div>
+          <div class="launch-link-state" id="fv-export-status">Renders the flight video with the telemetry overlay burned in, entirely on this machine.</div>
         </div>
-        <button class="sp-save" id="rcd-download" type="button" disabled>Download ZIP</button>
       </div>
-      <div class="rcd-progress" aria-hidden="false">
-        <div class="rcd-progress-track"><div class="rcd-progress-fill" id="rcd-progress-fill"></div></div>
-        <div class="rcd-progress-text" id="rcd-progress-text">Idle</div>
+      <div class="fv-export-row">
+        <label class="fv-export-field">
+          <span>Overlay</span>
+          <select id="fv-export-overlay"><option value="on" selected>Burn in telemetry overlay</option><option value="off">Plain video, no overlay</option></select>
+        </label>
+        <label class="fv-export-field">
+          <span>Render speed</span>
+          <select id="fv-export-rate"><option value="1">1× (real time)</option><option value="2" selected>2×</option><option value="4">4×</option><option value="8">8×</option></select>
+        </label>
+        <button class="sp-save" id="fv-export-start" type="button">Export video</button>
+        <button class="sp-secondary" id="fv-export-cancel" type="button" hidden>Cancel</button>
+        <button class="sp-secondary" id="fv-export-json" type="button">Download JSON data</button>
       </div>
-      <div id="rcd-flight-list" class="rcd-flight-list">
-        <div class="rcd-empty">No flights loaded.</div>
+      <div class="fv-progress" id="fv-export-progress-wrap" hidden>
+        <div class="fv-progress-track"><div class="fv-progress-fill" id="fv-export-progress-fill"></div></div>
+        <div class="fv-progress-text" id="fv-export-progress-text"></div>
       </div>
-    </section>
-  </div>
+    </div>
+  </section>
 </section>
 </main>
 
